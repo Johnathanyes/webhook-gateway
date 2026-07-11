@@ -1,0 +1,36 @@
+# Local development platform — dependencies only.
+#
+# This runs the infrastructure the gateway needs; the gateway itself runs on
+# your host via `go run ./cmd/gateway` (or `make run`) so code changes don't
+# require an image rebuild. The production/quickstart compose that containerizes
+# the gateway itself lives separately in deploy/docker/ (Phase 7).
+#
+# Postgres is pinned to 18 on purpose: the schema uses uuidv7(), which is a
+# native function only in Postgres 18+. This file is also the source of truth
+# for the real minimum Postgres version self-hosters need.
+name: webhook-gateway-dev
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+      POSTGRES_DB: gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      # Postgres 18+ images store data in a version-specific subdirectory and
+      # expect the mount at /var/lib/postgresql (not .../data as in <=17), so
+      # pg_upgrade --link works without crossing a mount boundary.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      # `docker compose up --wait` blocks until this passes, so the app never
+      # boots against a Postgres that isn't accepting connections yet.
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
