@@ -19,6 +19,7 @@ import (
 	"webhook-gateway/internal/config"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/observability"
 )
 
 func main() {
@@ -39,6 +40,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	slog.SetDefault(observability.NewLogger(cfg.LogLevel, cfg.LogFormat))
 	slog.Info("configuration loaded", "role", cfg.Role, "port", cfg.Port)
 
 	// Cancelled on the first SIGINT/SIGTERM so shutdown is graceful.

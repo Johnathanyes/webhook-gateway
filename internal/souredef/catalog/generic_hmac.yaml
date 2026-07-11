@@ -1,0 +1,15 @@
+# Generic HMAC — the fallback source type for any provider not yet in the
+# catalog, and the base scheme most provider-specific definitions build on.
+# It verifies an HMAC of the raw request body against a header value.
+slug: generic_hmac
+name: Generic HMAC
+description: >-
+  HMAC signature verification for custom or unlisted providers. The raw
+  request body is HMAC'd with the source's signing secret and compared
+  against the value in the configured header.
+
+verification:
+  type: hmac
+  algorithm: sha256
+  signature_header: X-Signature
+  encoding: hex

@@ -7,6 +7,7 @@
 export DATABASE_URL   ?= postgres://gateway:gateway@localhost:5432/gateway?sslmode=disable
 export ADMIN_PASSWORD ?= dev-password
 export ENCRYPTION_KEY ?= $(shell printf 'dev-32-byte-encryption-key-00000' | base64)
+export LOG_FORMAT ?= text
 
 .PHONY: db-up db-down db-reset run build tidy
 

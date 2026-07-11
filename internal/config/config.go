@@ -16,6 +16,8 @@ type Config struct {
 	DatabaseURL   string `yaml:"database_url"`
 	AdminPassword string `yaml:"admin_password"`
 	EncryptionKey string `yaml:"encryption_key"` // base64, decodes to 32 bytes (AES-256-GCM)
+	LogLevel      string `yaml:"log_level"`      // debug | info | warn | error
+	LogFormat     string `yaml:"log_format"`
 }
 
 var validRoles = map[string]bool{
@@ -26,6 +28,8 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		Port: 8080,  // defaults
 		Role: "all",
+		LogLevel:  "info",
+		LogFormat: "json",
 	}
 
 	// 1. YAML file — optional. Missing file is fine; malformed is not
@@ -61,6 +65,13 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("ENCRYPTION_KEY"); v != "" {
 		cfg.EncryptionKey = v
 	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
+	}
+	if v := os.Getenv("LOG_FORMAT"); v != "" {
+		cfg.LogFormat = v
+	}
+
 
 	// 3. Validate.
 	if err := cfg.validate(); err != nil {
