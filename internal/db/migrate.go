@@ -19,12 +19,16 @@ import (
 // Goose drives migrations over database/sql, while the rest of the app uses
 // pgx's native pool, so this opens its own short-lived connection rather
 // than reusing a *pgxpool.Pool.
-func Migrate(ctx context.Context, databaseURL string) error {
+func Migrate(ctx context.Context, databaseURL string) (err error) {
 	sqlDB, err := sql.Open("pgx", databaseURL)
 	if err != nil {
 		return fmt.Errorf("opening migration connection: %w", err)
 	}
-	defer sqlDB.Close()
+	defer func() {
+		if cerr := sqlDB.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("closing migration connection: %w", cerr)
+		}
+	}()
 
 	goose.SetBaseFS(migrations.FS)
 	if err := goose.SetDialect("postgres"); err != nil {
