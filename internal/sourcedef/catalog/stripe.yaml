@@ -1,0 +1,20 @@
+# Stripe — timestamp-signed HMAC (https://docs.stripe.com/webhooks#verify-manually).
+# The Stripe-Signature header carries "t=<unix ts>,v1=<hex sig>[,v0=...]"; the
+# signed payload is "<t>.<raw body>" and Stripe recommends rejecting
+# timestamps older than 5 minutes to defend against replay.
+slug: stripe
+name: Stripe
+description: >-
+  Stripe webhook signature verification. The raw request body is signed with
+  HMAC-SHA256 over "<timestamp>.<body>" using the endpoint's whsec_ signing
+  secret, delivered in the Stripe-Signature header as t/v1 fields.
+
+verification:
+  type: hmac
+  algorithm: sha256
+  encoding: hex
+  signature_header: Stripe-Signature
+  timestamp:
+    timestamp_field: t
+    signature_field: v1
+    tolerance_seconds: 300
