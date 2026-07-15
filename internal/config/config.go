@@ -18,6 +18,12 @@ type Config struct {
 	EncryptionKey string `yaml:"encryption_key"` // base64, decodes to 32 bytes (AES-256-GCM)
 	LogLevel      string `yaml:"log_level"`      // debug | info | warn | error
 	LogFormat     string `yaml:"log_format"`
+
+	// Ingest abuse-prevention knobs (BR-06). IngestMaxBodyBytes caps a webhook
+	// body (413 over it); IngestRateLimitPerSecond is the per-source token-bucket
+	// refill rate, and doubles as the burst capacity.
+	IngestMaxBodyBytes       int64 `yaml:"ingest_max_body_bytes"`
+	IngestRateLimitPerSecond int   `yaml:"ingest_rate_limit_per_second"`
 }
 
 var validRoles = map[string]bool{
@@ -30,6 +36,8 @@ func Load(path string) (*Config, error) {
 		Role: "all",
 		LogLevel:  "info",
 		LogFormat: "json",
+		IngestMaxBodyBytes:       1 << 20, // 1 MiB
+		IngestRateLimitPerSecond: 100,
 	}
 
 	// 1. YAML file — optional. Missing file is fine; malformed is not
@@ -71,6 +79,20 @@ func Load(path string) (*Config, error) {
 	if v := os.Getenv("LOG_FORMAT"); v != "" {
 		cfg.LogFormat = v
 	}
+	if v := os.Getenv("INGEST_MAX_BODY_BYTES"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("INGEST_MAX_BODY_BYTES must be a number, got %q", v)
+		}
+		cfg.IngestMaxBodyBytes = n
+	}
+	if v := os.Getenv("INGEST_RATE_LIMIT_PER_SECOND"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("INGEST_RATE_LIMIT_PER_SECOND must be a number, got %q", v)
+		}
+		cfg.IngestRateLimitPerSecond = n
+	}
 
 
 	// 3. Validate.
@@ -94,6 +116,12 @@ func (c *Config) validate() error {
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		problems = append(problems, fmt.Sprintf("PORT %d is out of range 1-65535", c.Port))
+	}
+	if c.IngestMaxBodyBytes < 1 {
+		problems = append(problems, fmt.Sprintf("INGEST_MAX_BODY_BYTES must be positive, got %d", c.IngestMaxBodyBytes))
+	}
+	if c.IngestRateLimitPerSecond < 1 {
+		problems = append(problems, fmt.Sprintf("INGEST_RATE_LIMIT_PER_SECOND must be positive, got %d", c.IngestRateLimitPerSecond))
 	}
 
 	// The encryption key protects signing secrets at rest (BR-26). AES-256-GCM
