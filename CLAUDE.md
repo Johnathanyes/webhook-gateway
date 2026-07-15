@@ -64,9 +64,6 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-# CodeGraph Context
-This repository is indexed with CodeGraph. When searching for symbols, file dependencies, definitions, or structural logic, prioritize reading from the local `.codegraph/` directory to construct your query context.
-
 ## graphify
 
 This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
