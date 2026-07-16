@@ -16,10 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"webhook-gateway/internal/api"
 	"webhook-gateway/internal/config"
+	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
-	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/ingest"
 	"webhook-gateway/internal/observability"
+	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/sourcedef"
 )
 
 func main() {
@@ -69,6 +73,28 @@ func run() error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// Ingest and the sources API run in the ingest and all roles. They share one
+	// catalog (loaded once) and encryptor so the sources API only creates sources
+	// ingest has a verifier for, and both open secrets under the same key.
+	if cfg.Role == "all" || cfg.Role == "ingest" {
+		enc, err := crypto.NewEncryptor(cfg.EncryptionKey)
+		if err != nil {
+			return fmt.Errorf("building encryptor: %w", err)
+		}
+		catalog, err := sourcedef.Load()
+		if err != nil {
+			return fmt.Errorf("loading source catalog: %w", err)
+		}
+		q := db.New(pool)
+
+		api.RegisterSources(mux, q, enc, catalog, cfg.AdminPassword)
+		ingest.Register(mux, pool, q, enc, catalog, ingest.Options{
+			MaxBodyBytes:       cfg.IngestMaxBodyBytes,
+			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
+		})
+		slog.Info("ingest and sources API mounted")
+	}
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.Port),
