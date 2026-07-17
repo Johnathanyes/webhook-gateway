@@ -113,7 +113,9 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	defer tx.Rollback(ctx)
+	defer func() {
+    	_ = tx.Rollback(ctx)
+	}()
 
 	if _, err := h.q.WithTx(tx).InsertEvent(ctx, db.InsertEventParams{
 		TenantID:    source.TenantID,
