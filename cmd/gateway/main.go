@@ -76,7 +76,7 @@ func run() error {
 	})
 
 	// Ingest and the sources API run in the ingest and all roles. They share one
-	// catalog (loaded once) and encryptor so the sources API only creates sources
+	// catalog and encryptor so the sources API only creates sources
 	// ingest has a verifier for, and both open secrets under the same key.
 	if cfg.Role == "all" || cfg.Role == "ingest" {
 		enc, err := crypto.NewEncryptor(cfg.EncryptionKey)
@@ -89,8 +89,15 @@ func run() error {
 		}
 		q := db.New(pool)
 
+		// Insert-only River client: ingest enqueues delivery jobs in the event's
+		// tx but never works them
+		insertClient, err := queue.NewInsertOnlyClient(pool)
+		if err != nil {
+			return err
+		}
+
 		api.RegisterSources(mux, q, enc, catalog, cfg.AdminPassword)
-		ingest.Register(mux, pool, q, enc, catalog, ingest.Options{
+		ingest.Register(mux, pool, q, insertClient, enc, catalog, ingest.Options{
 			MaxBodyBytes:       cfg.IngestMaxBodyBytes,
 			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
 		})

@@ -20,6 +20,11 @@ WHERE tenant_id = $1
     AND (sqlc.narg('destination_id')::uuid IS NULL OR destination_id = sqlc.narg('destination_id'))
 ORDER BY created_at DESC;
 
+-- name: ListEnabledDestinationIDsForSource :many
+-- Destinations an event from this source fans out to: enabled routes only.
+SELECT destination_id FROM routes
+WHERE source_id = $1 AND enabled = true;
+
 -- name: UpdateRouteEnabled :one
 UPDATE routes
 SET enabled = $3

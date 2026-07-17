@@ -18,12 +18,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/ingest"
+	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
 	"webhook-gateway/internal/tenancy"
 )
@@ -52,7 +55,7 @@ func TestIngestStoresEvent(t *testing.T) {
 	source := createGithubSource(t, pool, enc, secret)
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	body := []byte(`{"action":"opened","number":42}`)
 
@@ -97,6 +100,71 @@ func TestIngestStoresEvent(t *testing.T) {
 	})
 }
 
+// TestIngestTransactionalEnqueue covers BR-07: a stored event fans out to a
+// pending delivery + enqueued River job per enabled route, committed in the
+// same transaction as the event. Disabled routes and unrouted sources produce
+// no deliveries.
+func TestIngestTransactionalEnqueue(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	secret := []byte("test-signing-secret")
+	source := createGithubSource(t, pool, enc, secret)
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
+
+	body := []byte(`{"action":"opened"}`)
+	sign := func() map[string]string {
+		return map[string]string{
+			"Content-Type":        "application/json",
+			"X-Hub-Signature-256": githubSignature(secret, body),
+		}
+	}
+
+	t.Run("no routes means no deliveries", func(t *testing.T) {
+		if rec := post(mux, source.EndpointPath, body, sign()); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if n := deliveryCount(t, pool, source.ID); n != 0 {
+			t.Errorf("deliveries = %d, want 0 for an unrouted source", n)
+		}
+	})
+
+	dest := createDestination(t, pool)
+	createRoute(t, pool, source.ID, dest.ID, true)
+	disabledDest := createDestination(t, pool)
+	createRoute(t, pool, source.ID, disabledDest.ID, false)
+
+	t.Run("one enabled route yields one delivery with a river job", func(t *testing.T) {
+		if rec := post(mux, source.EndpointPath, body, sign()); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+
+		event := latestEventID(t, pool, source.ID)
+		deliveries := deliveriesForEvent(t, pool, event)
+		if len(deliveries) != 1 {
+			t.Fatalf("deliveries for event = %d, want 1 (enabled route only)", len(deliveries))
+		}
+		d := deliveries[0]
+		if d.destinationID != uuidStr(dest.ID) {
+			t.Errorf("delivery destination = %s, want %s", d.destinationID, uuidStr(dest.ID))
+		}
+		if d.status != "pending" {
+			t.Errorf("delivery status = %q, want pending", d.status)
+		}
+		if !d.riverJobID.Valid {
+			t.Errorf("river_job_id is NULL, want it backfilled from the enqueued job")
+		}
+		// The job must be committed in river_job, not just referenced.
+		if !riverJobExists(t, pool, d.riverJobID.Int64) {
+			t.Errorf("river_job %d not found; enqueue did not commit with the event", d.riverJobID.Int64)
+		}
+	})
+}
+
 // TestIngestMaxBodySize covers the payload cap: an oversized body is rejected
 // with 413 and nothing is persisted (BR-06).
 func TestIngestMaxBodySize(t *testing.T) {
@@ -108,7 +176,7 @@ func TestIngestMaxBodySize(t *testing.T) {
 	source := createGithubSource(t, pool, enc, []byte("secret"))
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, ingest.Options{MaxBodyBytes: 16, RateLimitPerSecond: 1000})
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, ingest.Options{MaxBodyBytes: 16, RateLimitPerSecond: 1000})
 
 	rec := post(mux, source.EndpointPath, []byte(strings.Repeat("x", 1024)), nil)
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -131,7 +199,7 @@ func TestIngestRateLimit(t *testing.T) {
 	source := createGithubSource(t, pool, enc, []byte("secret"))
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, ingest.Options{MaxBodyBytes: 1 << 20, RateLimitPerSecond: 1})
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, ingest.Options{MaxBodyBytes: 1 << 20, RateLimitPerSecond: 1})
 
 	// First request spends the single token.
 	if rec := post(mux, source.EndpointPath, []byte("{}"), nil); rec.Code != http.StatusOK {
@@ -162,7 +230,7 @@ func TestIngestNoneProvider(t *testing.T) {
 	source := createSource(t, pool, enc, "none", nil)
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	body := []byte(`{"anything":"goes"}`)
 	rec := post(mux, source.EndpointPath, body, map[string]string{"Content-Type": "application/json"})
@@ -192,7 +260,7 @@ func TestIngestStripeSigned(t *testing.T) {
 	source := createSource(t, pool, enc, "stripe", secret)
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	body := []byte(`{"id":"evt_1","object":"event"}`)
 
@@ -244,7 +312,7 @@ func TestIngestDecryptFailure(t *testing.T) {
 	source := createSource(t, pool, otherEnc, "github", secret)
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	body := []byte(`{"action":"opened"}`)
 	rec := post(mux, source.EndpointPath, body, map[string]string{
@@ -275,7 +343,7 @@ func TestIngestNonJSONBody(t *testing.T) {
 	source := createGithubSource(t, pool, enc, []byte("secret"))
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	body := []byte{0x00, 0x01, 0x02, 0xff, 'n', 'o', 't', 0x00, 'j', 's', 'o', 'n'}
 	rec := post(mux, source.EndpointPath, body, map[string]string{"Content-Type": "application/octet-stream"})
@@ -306,7 +374,7 @@ func TestIngestMultiValueHeaders(t *testing.T) {
 	source := createGithubSource(t, pool, enc, []byte("secret"))
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	req := httptest.NewRequest(http.MethodPost, "/ingest/"+source.EndpointPath, strings.NewReader("{}"))
 	req.Header.Add("X-Custom", "one")
@@ -340,7 +408,7 @@ func TestIngestConcurrent(t *testing.T) {
 	source := createGithubSource(t, pool, enc, secret)
 
 	mux := http.NewServeMux()
-	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+	ingest.Register(mux, pool, q, testRiverClient(t, pool), enc, catalog, generousOpts)
 
 	const n = 20
 	body := []byte(`{"action":"opened"}`)
@@ -390,6 +458,20 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// testRiverClient runs River's migrations nd returns an insert-only client, mirroring the
+// ingest role's wiring in main.go.
+func testRiverClient(t *testing.T, pool *pgxpool.Pool) *river.Client[pgx.Tx] {
+	t.Helper()
+	if err := queue.Migrate(context.Background(), pool); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
+	client, err := queue.NewInsertOnlyClient(pool)
+	if err != nil {
+		t.Fatalf("river client: %v", err)
+	}
+	return client
 }
 
 func testEncryptor(t *testing.T) *crypto.Encryptor {
@@ -526,6 +608,120 @@ func eventCount(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) int {
 		t.Fatalf("counting events: %v", err)
 	}
 	return n
+}
+
+// createDestination inserts a minimal destination and registers cleanup
+func createDestination(t *testing.T, pool *pgxpool.Pool) db.Destination {
+	t.Helper()
+	ctx := context.Background()
+	dest, err := db.New(pool).InsertDestination(ctx, db.InsertDestinationParams{
+		TenantID:           tenancy.DefaultTenantID,
+		Name:               "ingest-test-dest",
+		Url:                "https://example.test/hook",
+		AuthConfig:         []byte("{}"),
+		TimeoutMs:          5000,
+		RateLimitPerSecond: pgtype.Int4{},
+		MaxAttempts:        8,
+		BackoffBaseSeconds: 1,
+		BackoffMaxSeconds:  3600,
+	})
+	if err != nil {
+		t.Fatalf("insert destination: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM destinations WHERE id = $1", dest.ID)
+	})
+	return dest
+}
+
+func createRoute(t *testing.T, pool *pgxpool.Pool, sourceID, destID pgtype.UUID, enabled bool) {
+	t.Helper()
+	_, err := db.New(pool).InsertRoute(context.Background(), db.InsertRouteParams{
+		TenantID:      tenancy.DefaultTenantID,
+		SourceID:      sourceID,
+		DestinationID: destID,
+		Enabled:       enabled,
+	})
+	if err != nil {
+		t.Fatalf("insert route: %v", err)
+	}
+}
+
+func latestEventID(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) pgtype.UUID {
+	t.Helper()
+	var id pgtype.UUID
+	err := pool.QueryRow(context.Background(),
+		"SELECT id FROM events WHERE source_id = $1 ORDER BY received_at DESC LIMIT 1",
+		sourceID,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("querying latest event id: %v", err)
+	}
+	return id
+}
+
+type testDelivery struct {
+	destinationID string
+	status        string
+	riverJobID    pgtype.Int8
+}
+
+func deliveriesForEvent(t *testing.T, pool *pgxpool.Pool, eventID pgtype.UUID) []testDelivery {
+	t.Helper()
+	rows, err := pool.Query(context.Background(),
+		"SELECT destination_id, status, river_job_id FROM deliveries WHERE event_id = $1",
+		eventID,
+	)
+	if err != nil {
+		t.Fatalf("querying deliveries: %v", err)
+	}
+	defer rows.Close()
+	var out []testDelivery
+	for rows.Next() {
+		var (
+			destID pgtype.UUID
+			d      testDelivery
+		)
+		if err := rows.Scan(&destID, &d.status, &d.riverJobID); err != nil {
+			t.Fatalf("scanning delivery: %v", err)
+		}
+		d.destinationID = uuidStr(destID)
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating deliveries: %v", err)
+	}
+	return out
+}
+
+func deliveryCount(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) int {
+	t.Helper()
+	var n int
+	err := pool.QueryRow(context.Background(),
+		"SELECT count(*) FROM deliveries d JOIN events e ON e.id = d.event_id WHERE e.source_id = $1",
+		sourceID,
+	).Scan(&n)
+	if err != nil {
+		t.Fatalf("counting deliveries: %v", err)
+	}
+	return n
+}
+
+func riverJobExists(t *testing.T, pool *pgxpool.Pool, jobID int64) bool {
+	t.Helper()
+	var exists bool
+	err := pool.QueryRow(context.Background(),
+		"SELECT EXISTS (SELECT 1 FROM river_job WHERE id = $1)", jobID,
+	).Scan(&exists)
+	if err != nil {
+		t.Fatalf("checking river_job: %v", err)
+	}
+	return exists
+}
+
+func uuidStr(u pgtype.UUID) string {
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func randomHex(t *testing.T) string {

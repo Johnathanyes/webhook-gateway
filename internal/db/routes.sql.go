@@ -91,6 +91,33 @@ func (q *Queries) InsertRoute(ctx context.Context, arg InsertRouteParams) (Route
 	return i, err
 }
 
+const listEnabledDestinationIDsForSource = `-- name: ListEnabledDestinationIDsForSource :many
+SELECT destination_id FROM routes
+WHERE source_id = $1 AND enabled = true
+`
+
+// Destinations an event from this source fans out to: enabled routes only.
+// Drives the transactional enqueue
+func (q *Queries) ListEnabledDestinationIDsForSource(ctx context.Context, sourceID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listEnabledDestinationIDsForSource, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var destination_id pgtype.UUID
+		if err := rows.Scan(&destination_id); err != nil {
+			return nil, err
+		}
+		items = append(items, destination_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRoutes = `-- name: ListRoutes :many
 SELECT id, tenant_id, source_id, destination_id, enabled, created_at FROM routes
 WHERE tenant_id = $1

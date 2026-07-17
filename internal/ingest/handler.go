@@ -1,35 +1,36 @@
-// Package ingest receives inbound provider webhooks and durably stores them
-// (BR-01/04/05). It is the hot path: a request is looked up, verified, and
-// persisted verbatim, then acknowledged — nothing slower runs before the 200.
 package ingest
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/riverqueue/river"
 
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
 )
 
-// Options carries the ingest abuse-prevention knobs (BR-06).
 type Options struct {
 	MaxBodyBytes       int64 // reject bodies larger than this with 413
 	RateLimitPerSecond int   // per-source token-bucket rate; also the burst
 }
 
 // Handler stores inbound webhooks. It holds the pool directly (not just
-// Queries) because the insert runs in an explicit transaction, so Phase 2 can
-// enqueue a River job in the same tx as a small diff.
+// Queries) because the insert runs in an explicit transaction so the delivery
+// fan-out and its River jobs commit atomically with the event (BR-07).
 type Handler struct {
 	pool         *pgxpool.Pool
 	q            *db.Queries
+	river        *river.Client[pgx.Tx]
 	enc          *crypto.Encryptor
 	catalog      map[string]sourcedef.Definition
 	maxBodyBytes int64
@@ -38,10 +39,11 @@ type Handler struct {
 
 // Register mounts the ingest endpoint on mux. The catalog is loaded once at
 // boot and shared with the sources API so both sides agree on provider slugs.
-func Register(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, opts Options) {
+func Register(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, opts Options) {
 	h := &Handler{
 		pool:         pool,
 		q:            q,
+		river:        riverClient,
 		enc:          enc,
 		catalog:      catalog,
 		maxBodyBytes: opts.MaxBodyBytes,
@@ -114,20 +116,29 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
-    	_ = tx.Rollback(ctx)
+		_ = tx.Rollback(ctx)
 	}()
 
-	if _, err := h.q.WithTx(tx).InsertEvent(ctx, db.InsertEventParams{
+	qtx := h.q.WithTx(tx)
+	event, err := qtx.InsertEvent(ctx, db.InsertEventParams{
 		TenantID:    source.TenantID,
 		SourceID:    source.ID,
 		RawHeaders:  rawHeaders,
 		RawBody:     body,
 		ContentType: pgtype.Text{String: contentType, Valid: contentType != ""},
 		ParsedBody:  parsedBody,
-		DedupeKey:   pgtype.Text{}, // dedupe is Phase 2
+		DedupeKey:   pgtype.Text{}, // dedupe is Phase 3
 		Verified:    verified,
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Error("inserting event", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Fan out to every destination this source is routed to
+	if err := h.enqueueDeliveries(ctx, qtx, tx, source.TenantID, source.ID, event.ID); err != nil {
+		slog.Error("enqueuing deliveries", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -142,10 +153,42 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"received": true})
 }
 
+// enqueueDeliveries creates one delivery row and one River job per enabled
+// route for the source
+func (h *Handler) enqueueDeliveries(ctx context.Context, qtx *db.Queries, tx pgx.Tx, tenantID, sourceID, eventID pgtype.UUID) error {
+	destIDs, err := qtx.ListEnabledDestinationIDsForSource(ctx, sourceID)
+	if err != nil {
+		return err
+	}
+
+	for _, destID := range destIDs {
+		deliveryID, err := qtx.InsertDelivery(ctx, db.InsertDeliveryParams{
+			TenantID:      tenantID,
+			EventID:       eventID,
+			DestinationID: destID,
+		})
+		if err != nil {
+			return err
+		}
+
+		res, err := h.river.InsertTx(ctx, tx, queue.DeliveryArgs{DeliveryID: uuidString(deliveryID)}, nil)
+		if err != nil {
+			return err
+		}
+
+		if err := qtx.SetDeliveryRiverJobID(ctx, db.SetDeliveryRiverJobIDParams{
+			ID:         deliveryID,
+			RiverJobID: pgtype.Int8{Int64: res.Job.ID, Valid: true},
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // verify runs the source's provider verifier and reports whether the signature
 // checked out. A source with provider_type "none" has no catalog entry and is
-// always treated as verified. A decrypt or verifier error (which a validated
-// catalog should make impossible) is logged and counts as unverified rather
+// always treated as verified. A decrypt or verifier error is logged and counts as unverified rather
 // than dropping the event.
 func (h *Handler) verify(source db.Source, body []byte, headers http.Header) bool {
 	def, ok := h.catalog[source.ProviderType]
@@ -186,4 +229,9 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func uuidString(u pgtype.UUID) string {
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
