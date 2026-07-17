@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
-// writeJSON writes body as a JSON response with the given status. A nil body
+// Writes body as a JSON response with the given status. A nil body
 // writes just the status line (for 204-style replies).
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -19,8 +21,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	}
 }
 
-// writeError writes a JSON {"error": message} body. Messages are intentionally
-// generic so they don't leak internals to the caller.
+// Writes a JSON {"error": message} body
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func parseUUID(s string) (pgtype.UUID, error) {
+	var u pgtype.UUID
+	err := u.Scan(s)
+	return u, err
 }

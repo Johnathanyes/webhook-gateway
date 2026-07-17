@@ -31,15 +31,40 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
+// DeliveryArgs is the job enqueued for each (event, destination) pair that
+// needs to be delivered. It carries only the delivery row's id;
+type DeliveryArgs struct {
+	DeliveryID string `json:"delivery_id"`
+}
+
+// Kind is the stable job type name River persists in river_job.kind; changing
+// it would orphan already-enqueued jobs, so it is fixed.
+func (DeliveryArgs) Kind() string { return "delivery" }
+
 // NewInsertOnlyClient builds a River client that can only enqueue jobs, not
-// work them — this is what the ingest role uses. With no Queues configured
-// the client never polls for work, so it's safe to run in a process that
-// only produces jobs. The worker role will build a full client with
-// registered workers in the delivery phase.
+// work them, ingest uses this.
 func NewInsertOnlyClient(pool *pgxpool.Pool) (*river.Client[pgx.Tx], error) {
 	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("creating river client: %w", err)
+	}
+	return client, nil
+}
+
+// Number of delivery jobs a single worker process
+// runs at once. It caps outbound concurrency across all destinations
+const WorkerConcurrency = 10
+
+// Builds work-capable River client
+func NewWorkerClient(pool *pgxpool.Pool, workers *river.Workers) (*river.Client[pgx.Tx], error) {
+	client, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Queues: map[string]river.QueueConfig{
+			river.QueueDefault: {MaxWorkers: WorkerConcurrency},
+		},
+		Workers: workers,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating river worker client: %w", err)
 	}
 	return client, nil
 }

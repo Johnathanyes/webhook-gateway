@@ -20,6 +20,7 @@ import (
 	"webhook-gateway/internal/config"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/delivery"
 	"webhook-gateway/internal/ingest"
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
@@ -94,6 +95,33 @@ func run() error {
 			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
 		})
 		slog.Info("ingest and sources API mounted")
+	}
+
+	if cfg.Role == "all" || cfg.Role == "dashboard" {
+		q := db.New(pool)
+		api.RegisterDestinations(mux, q, cfg.AdminPassword)
+		api.RegisterRoutes(mux, q, cfg.AdminPassword)
+		slog.Info("destinations and routes API mounted")
+	}
+
+	if cfg.Role == "all" || cfg.Role == "worker" {
+		workerClient, err := delivery.NewClient(pool, db.New(pool))
+		if err != nil {
+			return err
+		}
+		// Start with a background context. Graceful drain is done via Stop() below, so a
+		// SIGTERM lets in-progress deliveries finish instead of being cut off.
+		if err := workerClient.Start(context.Background()); err != nil {
+			return fmt.Errorf("starting delivery worker: %w", err)
+		}
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := workerClient.Stop(stopCtx); err != nil {
+				slog.Error("stopping delivery worker", "error", err)
+			}
+		}()
+		slog.Info("delivery worker started")
 	}
 
 	srv := &http.Server{
