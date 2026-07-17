@@ -5,12 +5,18 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -144,6 +150,227 @@ func TestIngestRateLimit(t *testing.T) {
 	}
 }
 
+// TestIngestNoneProvider covers a source whose provider_type is "none": it has
+// no catalog verifier, so every event is stored verified=true regardless of
+// headers.
+func TestIngestNoneProvider(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	source := createSource(t, pool, enc, "none", nil)
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	body := []byte(`{"anything":"goes"}`)
+	rec := post(mux, source.EndpointPath, body, map[string]string{"Content-Type": "application/json"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	storedBody, verified := latestEvent(t, pool, source.ID)
+	if string(storedBody) != string(body) {
+		t.Errorf("stored raw_body = %q, want %q", storedBody, body)
+	}
+	if !verified {
+		t.Error("verified = false, want true for a provider-less source")
+	}
+}
+
+// TestIngestStripeSigned drives the full pipeline for the Stripe verifier (the
+// timestamped scheme, distinct from GitHub's prefix scheme): a fresh signature
+// stores verified=true, an expired one still stores but verified=false.
+func TestIngestStripeSigned(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	secret := []byte("whsec_test_secret")
+	source := createSource(t, pool, enc, "stripe", secret)
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	body := []byte(`{"id":"evt_1","object":"event"}`)
+
+	t.Run("fresh signature verifies", func(t *testing.T) {
+		rec := post(mux, source.EndpointPath, body, map[string]string{
+			"Content-Type":     "application/json",
+			"Stripe-Signature": stripeSignature(secret, body, time.Now().Unix()),
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if _, verified := latestEvent(t, pool, source.ID); !verified {
+			t.Error("verified = false, want true for a fresh Stripe signature")
+		}
+	})
+
+	t.Run("expired signature stores unverified", func(t *testing.T) {
+		rec := post(mux, source.EndpointPath, body, map[string]string{
+			"Content-Type":     "application/json",
+			"Stripe-Signature": stripeSignature(secret, body, time.Now().Unix()-3600),
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		if _, verified := latestEvent(t, pool, source.ID); verified {
+			t.Error("verified = true, want false for an expired Stripe timestamp")
+		}
+	})
+}
+
+// TestIngestDecryptFailure covers a source whose stored secret can't be
+// decrypted with the running key (e.g. a rotated ENCRYPTION_KEY): the event is
+// still stored with verified=false and a 200, so the misconfiguration shows up
+// in the log instead of dropping webhooks.
+func TestIngestDecryptFailure(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	// The source's secret is encrypted under a different key than the handler
+	// holds, so the handler's Decrypt fails.
+	otherKey := base64.StdEncoding.EncodeToString([]byte("wrong-32-byte-encryption-key-000"))
+	otherEnc, err := crypto.NewEncryptor(otherKey)
+	if err != nil {
+		t.Fatalf("building second encryptor: %v", err)
+	}
+	secret := []byte("test-signing-secret")
+	source := createSource(t, pool, otherEnc, "github", secret)
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	body := []byte(`{"action":"opened"}`)
+	rec := post(mux, source.EndpointPath, body, map[string]string{
+		"Content-Type":        "application/json",
+		"X-Hub-Signature-256": githubSignature(secret, body),
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (undecryptable secret still stores); body=%s", rec.Code, rec.Body.String())
+	}
+
+	storedBody, verified := latestEvent(t, pool, source.ID)
+	if string(storedBody) != string(body) {
+		t.Errorf("stored raw_body = %q, want %q", storedBody, body)
+	}
+	if verified {
+		t.Error("verified = true, want false when the signing secret can't be decrypted")
+	}
+}
+
+// TestIngestNonJSONBody covers a non-JSON payload: raw_body is stored
+// byte-identical (including NUL bytes) and parsed_body stays NULL.
+func TestIngestNonJSONBody(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	source := createGithubSource(t, pool, enc, []byte("secret"))
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	body := []byte{0x00, 0x01, 0x02, 0xff, 'n', 'o', 't', 0x00, 'j', 's', 'o', 'n'}
+	rec := post(mux, source.EndpointPath, body, map[string]string{"Content-Type": "application/octet-stream"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rawBody, parsedBody, contentType, _ := latestEventFull(t, pool, source.ID)
+	if string(rawBody) != string(body) {
+		t.Errorf("stored raw_body = %v, want %v", rawBody, body)
+	}
+	if parsedBody != nil {
+		t.Errorf("parsed_body = %q, want NULL for a non-JSON body", parsedBody)
+	}
+	if contentType != "application/octet-stream" {
+		t.Errorf("content_type = %q, want application/octet-stream", contentType)
+	}
+}
+
+// TestIngestMultiValueHeaders confirms a repeated request header survives the
+// raw_headers JSONB round-trip with both values intact.
+func TestIngestMultiValueHeaders(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	source := createGithubSource(t, pool, enc, []byte("secret"))
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	req := httptest.NewRequest(http.MethodPost, "/ingest/"+source.EndpointPath, strings.NewReader("{}"))
+	req.Header.Add("X-Custom", "one")
+	req.Header.Add("X-Custom", "two")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	_, _, _, rawHeaders := latestEventFull(t, pool, source.ID)
+	var headers map[string][]string
+	if err := json.Unmarshal(rawHeaders, &headers); err != nil {
+		t.Fatalf("unmarshaling raw_headers: %v", err)
+	}
+	if got := headers["X-Custom"]; len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Errorf("X-Custom = %v, want [one two]", got)
+	}
+}
+
+// TestIngestConcurrent fires many signed requests at one source in parallel:
+// all get 200 and every event is persisted. Run with -race, it also guards the
+// handler and limiter against data races.
+func TestIngestConcurrent(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	secret := []byte("secret")
+	source := createGithubSource(t, pool, enc, secret)
+
+	mux := http.NewServeMux()
+	ingest.Register(mux, pool, q, enc, catalog, generousOpts)
+
+	const n = 20
+	body := []byte(`{"action":"opened"}`)
+	sig := githubSignature(secret, body)
+
+	var wg sync.WaitGroup
+	codes := make([]int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := post(mux, source.EndpointPath, body, map[string]string{
+				"Content-Type":        "application/json",
+				"X-Hub-Signature-256": sig,
+			})
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Errorf("request %d status = %d, want 200", i, code)
+		}
+	}
+	if got := eventCount(t, pool, source.ID); got != n {
+		t.Errorf("stored events = %d, want %d", got, n)
+	}
+}
+
 // --- helpers ---
 
 func testDB(t *testing.T) *pgxpool.Pool {
@@ -183,22 +410,40 @@ func testCatalog(t *testing.T) map[string]sourcedef.Definition {
 	return catalog
 }
 
-// createGithubSource inserts a github source with an encrypted secret and
-// registers cleanup of it and its events.
+// createGithubSource inserts a github source with an encrypted secret. It is a
+// thin wrapper over createSource for the common case.
 func createGithubSource(t *testing.T, pool *pgxpool.Pool, enc *crypto.Encryptor, secret []byte) db.Source {
 	t.Helper()
+	return createSource(t, pool, enc, "github", secret)
+}
+
+// createSource inserts a source for the given provider, encrypting secret with
+// enc (an empty secret leaves the secret columns NULL, as provider "none"
+// needs), and registers cleanup of it and its events. Passing an encryptor
+// keyed differently from the handler's lets a test exercise the decrypt-failure
+// path.
+func createSource(t *testing.T, pool *pgxpool.Pool, enc *crypto.Encryptor, provider string, secret []byte) db.Source {
+	t.Helper()
 	ctx := context.Background()
-	encrypted, version, err := enc.Encrypt(secret)
-	if err != nil {
-		t.Fatalf("encrypt secret: %v", err)
+
+	var encrypted []byte
+	var version pgtype.Int4
+	if len(secret) > 0 {
+		ciphertext, v, err := enc.Encrypt(secret)
+		if err != nil {
+			t.Fatalf("encrypt secret: %v", err)
+		}
+		encrypted = ciphertext
+		version = pgtype.Int4{Int32: int32(v), Valid: true}
 	}
+
 	source, err := db.New(pool).InsertSource(ctx, db.InsertSourceParams{
 		TenantID:                tenancy.DefaultTenantID,
 		Name:                    "ingest-test",
-		ProviderType:            "github",
+		ProviderType:            provider,
 		EndpointPath:            "src_" + randomHex(t),
 		SigningSecretEncrypted:  encrypted,
-		SigningSecretKeyVersion: pgtype.Int4{Int32: int32(version), Valid: true},
+		SigningSecretKeyVersion: version,
 		VerificationConfig:      []byte("{}"),
 	})
 	if err != nil {
@@ -228,6 +473,15 @@ func githubSignature(secret, body []byte) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+// stripeSignature builds a Stripe-Signature header value for body signed at ts:
+// HMAC-SHA256 over "<ts>.<body>", hex, in the t/v1 field format.
+func stripeSignature(secret, body []byte, ts int64) string {
+	payload := strconv.FormatInt(ts, 10) + "." + string(body)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(payload))
+	return fmt.Sprintf("t=%d,v1=%s", ts, hex.EncodeToString(mac.Sum(nil)))
+}
+
 // latestEvent returns the raw_body and verified flag of the most recent event
 // for a source.
 func latestEvent(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) ([]byte, bool) {
@@ -242,6 +496,24 @@ func latestEvent(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) ([]byte
 		t.Fatalf("querying stored event: %v", err)
 	}
 	return rawBody, verified
+}
+
+// latestEventFull returns the raw_body, parsed_body (nil when the column is
+// NULL), content_type, and raw_headers of the most recent event for a source.
+func latestEventFull(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) (rawBody, parsedBody []byte, contentType string, rawHeaders []byte) {
+	t.Helper()
+	var ct *string
+	err := pool.QueryRow(context.Background(),
+		"SELECT raw_body, parsed_body, content_type, raw_headers FROM events WHERE source_id = $1 ORDER BY received_at DESC LIMIT 1",
+		sourceID,
+	).Scan(&rawBody, &parsedBody, &ct, &rawHeaders)
+	if err != nil {
+		t.Fatalf("querying stored event: %v", err)
+	}
+	if ct != nil {
+		contentType = *ct
+	}
+	return rawBody, parsedBody, contentType, rawHeaders
 }
 
 func eventCount(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) int {
