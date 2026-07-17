@@ -24,6 +24,7 @@ func Migrate(ctx context.Context, databaseURL string) (err error) {
 	if err != nil {
 		return fmt.Errorf("opening migration connection: %w", err)
 	}
+	
 	defer func() {
 		if cerr := sqlDB.Close(); cerr != nil && err == nil {
 			err = fmt.Errorf("closing migration connection: %w", cerr)

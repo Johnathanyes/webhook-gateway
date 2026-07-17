@@ -56,13 +56,20 @@ func (d Definition) validate() error {
 	case "none":
 		return nil // no signature to verify
 	case "hmac":
-		return d.Verification.validate()
+		return d.Verification.validateHMAC()
+	case "api_key":
+		if d.Verification.SignatureHeader == "" {
+			return fmt.Errorf("verification.signature_header is required for api_key")
+		}
+		return nil
+	case "basic_auth":
+		return nil // credentials are the secret; header is always Authorization
 	default:
-		return fmt.Errorf("verification.type %q is invalid (want: hmac, none)", d.Verification.Type)
+		return fmt.Errorf("verification.type %q is invalid (want: hmac, api_key, basic_auth, none)", d.Verification.Type)
 	}
 }
 
-func (v Verification) validate() error {
+func (v Verification) validateHMAC() error {
 	switch v.Algorithm {
 	case "sha256", "sha1":
 	default:
@@ -75,6 +82,14 @@ func (v Verification) validate() error {
 	}
 	if v.SignatureHeader == "" {
 		return fmt.Errorf("verification.signature_header is required for hmac")
+	}
+	if ts := v.Timestamp; ts != nil {
+		if ts.TimestampField == "" || ts.SignatureField == "" {
+			return fmt.Errorf("verification.timestamp requires timestamp_field and signature_field")
+		}
+		if ts.ToleranceSeconds <= 0 {
+			return fmt.Errorf("verification.timestamp.tolerance_seconds must be positive")
+		}
 	}
 	return nil
 }

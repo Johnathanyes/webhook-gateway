@@ -1,0 +1,16 @@
+# GitHub — HMAC-SHA256 of the raw body, hex-encoded, delivered as
+# "sha256=<hex>" in X-Hub-Signature-256
+# (https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries).
+slug: github
+name: GitHub
+description: >-
+  GitHub webhook signature verification. The raw request body is HMAC-SHA256'd
+  with the webhook's shared secret and compared against the hex digest in the
+  X-Hub-Signature-256 header (prefixed with "sha256=").
+
+verification:
+  type: hmac
+  algorithm: sha256
+  encoding: hex
+  signature_header: X-Hub-Signature-256
+  signature_prefix: "sha256="
