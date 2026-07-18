@@ -1,3 +1,7 @@
+-- name: GetEventForDelivery :one
+SELECT raw_body, content_type FROM events
+WHERE id = $1;
+
 -- name: InsertEvent :one
 -- Persists an inbound webhook: raw_headers as JSONB,
 -- raw_body as the exact bytes received, parsed_body a best-effort JSON parse

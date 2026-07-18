@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getEventForDelivery = `-- name: GetEventForDelivery :one
+SELECT raw_body, content_type FROM events
+WHERE id = $1
+`
+
+type GetEventForDeliveryRow struct {
+	RawBody     []byte      `json:"raw_body"`
+	ContentType pgtype.Text `json:"content_type"`
+}
+
+// The bytes a delivery pushes to its destination: the verbatim payload and the
+// content type to send it under. Provider headers are intentionally not
+// forwarded (a delivery is a fresh request, not a proxy of the inbound one).
+func (q *Queries) GetEventForDelivery(ctx context.Context, id pgtype.UUID) (GetEventForDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, getEventForDelivery, id)
+	var i GetEventForDeliveryRow
+	err := row.Scan(&i.RawBody, &i.ContentType)
+	return i, err
+}
+
 const insertEvent = `-- name: InsertEvent :one
 INSERT INTO events (
     tenant_id,

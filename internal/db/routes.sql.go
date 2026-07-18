@@ -97,7 +97,6 @@ WHERE source_id = $1 AND enabled = true
 `
 
 // Destinations an event from this source fans out to: enabled routes only.
-// Drives the transactional enqueue
 func (q *Queries) ListEnabledDestinationIDsForSource(ctx context.Context, sourceID pgtype.UUID) ([]pgtype.UUID, error) {
 	rows, err := q.db.Query(ctx, listEnabledDestinationIDsForSource, sourceID)
 	if err != nil {

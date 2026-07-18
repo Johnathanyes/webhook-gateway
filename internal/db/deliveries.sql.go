@@ -11,6 +11,31 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getDelivery = `-- name: GetDelivery :one
+SELECT id, tenant_id, event_id, destination_id, river_job_id, status, attempt_count, next_attempt_at, last_attempted_at, dead_lettered_at, created_at, updated_at FROM deliveries
+WHERE id = $1
+`
+
+func (q *Queries) GetDelivery(ctx context.Context, id pgtype.UUID) (Delivery, error) {
+	row := q.db.QueryRow(ctx, getDelivery, id)
+	var i Delivery
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.EventID,
+		&i.DestinationID,
+		&i.RiverJobID,
+		&i.Status,
+		&i.AttemptCount,
+		&i.NextAttemptAt,
+		&i.LastAttemptedAt,
+		&i.DeadLetteredAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertDelivery = `-- name: InsertDelivery :one
 INSERT INTO deliveries (
     tenant_id,
@@ -54,5 +79,28 @@ type SetDeliveryRiverJobIDParams struct {
 // queue row can be cross-referenced from the delivery while debugging (BR-17).
 func (q *Queries) SetDeliveryRiverJobID(ctx context.Context, arg SetDeliveryRiverJobIDParams) error {
 	_, err := q.db.Exec(ctx, setDeliveryRiverJobID, arg.ID, arg.RiverJobID)
+	return err
+}
+
+const updateDeliveryOutcome = `-- name: UpdateDeliveryOutcome :exec
+UPDATE deliveries
+SET status = $2,
+    attempt_count = $3,
+    last_attempted_at = now(),
+    updated_at = now()
+WHERE id = $1
+`
+
+type UpdateDeliveryOutcomeParams struct {
+	ID           pgtype.UUID `json:"id"`
+	Status       string      `json:"status"`
+	AttemptCount int32       `json:"attempt_count"`
+}
+
+// Records the result of a delivery attempt: the new status ('succeeded' or
+// 'failed'), the attempt count (River's attempt number), and when it ran.
+// Backoff scheduling (next_attempt_at) and dead-lettering are separate tasks.
+func (q *Queries) UpdateDeliveryOutcome(ctx context.Context, arg UpdateDeliveryOutcomeParams) error {
+	_, err := q.db.Exec(ctx, updateDeliveryOutcome, arg.ID, arg.Status, arg.AttemptCount)
 	return err
 }

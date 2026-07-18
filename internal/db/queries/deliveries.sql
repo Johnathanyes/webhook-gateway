@@ -12,6 +12,18 @@ INSERT INTO deliveries (
 )
 RETURNING id;
 
+-- name: GetDelivery :one
+SELECT * FROM deliveries
+WHERE id = $1;
+
+-- name: UpdateDeliveryOutcome :exec
+UPDATE deliveries
+SET status = $2,
+    attempt_count = $3,
+    last_attempted_at = now(),
+    updated_at = now()
+WHERE id = $1;
+
 -- name: SetDeliveryRiverJobID :exec
 -- Backfills the River job id onto a delivery once the job is enqueued, so the
 -- queue row can be cross-referenced from the delivery while debugging (BR-17).
