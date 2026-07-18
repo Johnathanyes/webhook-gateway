@@ -171,23 +171,20 @@ func (h *Handler) enqueueDeliveries(ctx context.Context, qtx *db.Queries, tx pgx
 			return err
 		}
 
-		// Snapshot the destination's retry policy onto the job
-		maxAttempts := int(target.MaxAttempts)
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
-		res, err := h.river.InsertTx(ctx, tx, queue.DeliveryArgs{
+		// Snapshot the destination's retry policy onto the job (BR-08): the
+		// backoff base/max ride in the args, max_attempts caps River's retries.
+		jobID, err := queue.InsertDeliveryJob(ctx, h.river, tx, queue.DeliveryArgs{
 			DeliveryID:         uuidString(deliveryID),
 			BackoffBaseSeconds: target.BackoffBaseSeconds,
 			BackoffMaxSeconds:  target.BackoffMaxSeconds,
-		}, &river.InsertOpts{MaxAttempts: maxAttempts})
+		}, int(target.MaxAttempts))
 		if err != nil {
 			return err
 		}
 
 		if err := qtx.SetDeliveryRiverJobID(ctx, db.SetDeliveryRiverJobIDParams{
 			ID:         deliveryID,
-			RiverJobID: pgtype.Int8{Int64: res.Job.ID, Valid: true},
+			RiverJobID: pgtype.Int8{Int64: jobID, Valid: true},
 		}); err != nil {
 			return err
 		}

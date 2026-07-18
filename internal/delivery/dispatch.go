@@ -27,11 +27,11 @@ type attemptResult struct {
 	errMsg          pgtype.Text
 	durationMs      pgtype.Int4
 	succeeded       bool
+	retryable       bool
 }
 
-// dispatch performs one HTTP POST of the event payload to the destination,
-// bounded by the destination's timeout.
-func (w *Worker) dispatch(ctx context.Context, dest db.Destination, event db.GetEventForDeliveryRow) attemptResult {
+// dispatch performs one HTTP POST of the event payload to the destination
+func (w *Worker) dispatch(ctx context.Context, dest db.Destination, event db.GetEventForDeliveryRow, deliveryID string) attemptResult {
 	timeout := time.Duration(dest.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		timeout = defaultTimeout
@@ -41,8 +41,10 @@ func (w *Worker) dispatch(ctx context.Context, dest db.Destination, event db.Get
 
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, dest.Url, bytes.NewReader(event.RawBody))
 	if err != nil {
-		return attemptResult{errMsg: text(err.Error())}
+		// A malformed destination URL won't fix itself; treat as terminal.
+		return attemptResult{errMsg: text(err.Error()), retryable: false}
 	}
+	req.Header.Set("Webhook-Id", deliveryID)
 	if event.ContentType.Valid {
 		req.Header.Set("Content-Type", event.ContentType.String)
 	}
@@ -57,8 +59,10 @@ func (w *Worker) dispatch(ctx context.Context, dest db.Destination, event db.Get
 		durationMs:     pgtype.Int4{Int32: int32(duration.Milliseconds()), Valid: true},
 	}
 	if err != nil {
-		// No HTTP response: timeout, connection refused, DNS failure, etc.
+		// No HTTP response: timeout, connection refused, DNS failure, etc. These
+		// are transient by nature, so retry.
 		result.errMsg = text(err.Error())
+		result.retryable = true
 		return result
 	}
 	defer resp.Body.Close()
@@ -74,8 +78,16 @@ func (w *Worker) dispatch(ctx context.Context, dest db.Destination, event db.Get
 	result.succeeded = resp.StatusCode >= 200 && resp.StatusCode < 300
 	if !result.succeeded {
 		result.errMsg = text(http.StatusText(resp.StatusCode))
+		result.retryable = isRetryableStatus(resp.StatusCode)
 	}
 	return result
+}
+
+// Reports whether a non-2xx response is worth retrying. 408
+// (Request Timeout) and 429 (Too Many Requests) are transient, as is any 5xx;
+// every other 4xx is a client error the destination will keep rejecting.
+func isRetryableStatus(code int) bool {
+	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500
 }
 
 func text(s string) pgtype.Text {

@@ -106,9 +106,16 @@ func run() error {
 
 	if cfg.Role == "all" || cfg.Role == "dashboard" {
 		q := db.New(pool)
+		// The recover endpoint re-enqueues delivery jobs, so the dashboard role
+		// needs its own insert-only River client.
+		insertClient, err := queue.NewInsertOnlyClient(pool)
+		if err != nil {
+			return err
+		}
 		api.RegisterDestinations(mux, q, cfg.AdminPassword)
 		api.RegisterRoutes(mux, q, cfg.AdminPassword)
-		slog.Info("destinations and routes API mounted")
+		api.RegisterDeliveries(mux, pool, q, insertClient, cfg.AdminPassword)
+		slog.Info("destinations, routes, and deliveries API mounted")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {

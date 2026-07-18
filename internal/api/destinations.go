@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	defaultTimeoutMs          = 10000
-	defaultMaxAttempts        = 8
+	defaultTimeoutMs = 10000
+	// 16 attempts with the exponential backoff below spreads retries across
+	// roughly three days
+	defaultMaxAttempts        = 16
 	defaultBackoffBaseSeconds = 30
 	defaultBackoffMaxSeconds  = 43200
 )

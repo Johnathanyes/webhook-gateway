@@ -108,10 +108,6 @@ type ListEnabledDeliveryTargetsForSourceRow struct {
 	BackoffMaxSeconds  int32       `json:"backoff_max_seconds"`
 }
 
-// Destinations an event from this source fans out to (enabled routes only),
-// with the per-destination retry knobs the enqueue snapshots onto each delivery
-// job: max_attempts (set on the River job) and the backoff base/max (carried in
-// the job args) so retries follow the destination's policy (BR-07/08).
 func (q *Queries) ListEnabledDeliveryTargetsForSource(ctx context.Context, sourceID pgtype.UUID) ([]ListEnabledDeliveryTargetsForSourceRow, error) {
 	rows, err := q.db.Query(ctx, listEnabledDeliveryTargetsForSource, sourceID)
 	if err != nil {

@@ -1,8 +1,4 @@
 -- name: InsertDelivery :one
--- Creates the pending delivery for an (event, destination) pair produced by
--- fan-out at ingest. status defaults to 'pending' and attempt_count to 0; the
--- River job that drives it is enqueued in the same transaction and its id
--- backfilled via SetDeliveryRiverJobID.
 INSERT INTO deliveries (
     tenant_id,
     event_id,
@@ -16,11 +12,21 @@ RETURNING id;
 SELECT * FROM deliveries
 WHERE id = $1;
 
--- name: UpdateDeliveryOutcome :exec
+-- name: RecordDeliveryOutcome :one
 UPDATE deliveries
 SET status = $2,
-    attempt_count = $3,
+    attempt_count = attempt_count + 1,
     last_attempted_at = now(),
+    dead_lettered_at = CASE WHEN $2 = 'dead_lettered' THEN now() ELSE dead_lettered_at END,
+    updated_at = now()
+WHERE id = $1
+RETURNING attempt_count;
+
+-- name: ResetDeliveryForRecovery :exec
+UPDATE deliveries
+SET status = 'pending',
+    dead_lettered_at = NULL,
+    next_attempt_at = NULL,
     updated_at = now()
 WHERE id = $1;
 

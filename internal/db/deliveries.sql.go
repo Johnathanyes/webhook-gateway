@@ -64,6 +64,49 @@ func (q *Queries) InsertDelivery(ctx context.Context, arg InsertDeliveryParams) 
 	return id, err
 }
 
+const recordDeliveryOutcome = `-- name: RecordDeliveryOutcome :one
+UPDATE deliveries
+SET status = $2,
+    attempt_count = attempt_count + 1,
+    last_attempted_at = now(),
+    dead_lettered_at = CASE WHEN $2 = 'dead_lettered' THEN now() ELSE dead_lettered_at END,
+    updated_at = now()
+WHERE id = $1
+RETURNING attempt_count
+`
+
+type RecordDeliveryOutcomeParams struct {
+	ID     pgtype.UUID `json:"id"`
+	Status string      `json:"status"`
+}
+
+// Applies the result of one attempt. Returns the new attempt_count
+// to number the delivery_attempts row.
+func (q *Queries) RecordDeliveryOutcome(ctx context.Context, arg RecordDeliveryOutcomeParams) (int32, error) {
+	row := q.db.QueryRow(ctx, recordDeliveryOutcome, arg.ID, arg.Status)
+	var attempt_count int32
+	err := row.Scan(&attempt_count)
+	return attempt_count, err
+}
+
+const resetDeliveryForRecovery = `-- name: ResetDeliveryForRecovery :exec
+UPDATE deliveries
+SET status = 'pending',
+    dead_lettered_at = NULL,
+    next_attempt_at = NULL,
+    updated_at = now()
+WHERE id = $1
+`
+
+// Returns a dead-lettered delivery to the queue for a fresh set of attempts.
+// attempt_count is intentionally left as-is so the
+// attempt history stays continuous; the re-enqueued River job gets its own
+// fresh retry budget.
+func (q *Queries) ResetDeliveryForRecovery(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, resetDeliveryForRecovery, id)
+	return err
+}
+
 const setDeliveryRiverJobID = `-- name: SetDeliveryRiverJobID :exec
 UPDATE deliveries
 SET river_job_id = $2
@@ -79,25 +122,5 @@ type SetDeliveryRiverJobIDParams struct {
 // queue row can be cross-referenced from the delivery while debugging (BR-17).
 func (q *Queries) SetDeliveryRiverJobID(ctx context.Context, arg SetDeliveryRiverJobIDParams) error {
 	_, err := q.db.Exec(ctx, setDeliveryRiverJobID, arg.ID, arg.RiverJobID)
-	return err
-}
-
-const updateDeliveryOutcome = `-- name: UpdateDeliveryOutcome :exec
-UPDATE deliveries
-SET status = $2,
-    attempt_count = $3,
-    last_attempted_at = now(),
-    updated_at = now()
-WHERE id = $1
-`
-
-type UpdateDeliveryOutcomeParams struct {
-	ID           pgtype.UUID `json:"id"`
-	Status       string      `json:"status"`
-	AttemptCount int32       `json:"attempt_count"`
-}
-
-func (q *Queries) UpdateDeliveryOutcome(ctx context.Context, arg UpdateDeliveryOutcomeParams) error {
-	_, err := q.db.Exec(ctx, updateDeliveryOutcome, arg.ID, arg.Status, arg.AttemptCount)
 	return err
 }

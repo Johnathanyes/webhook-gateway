@@ -1,8 +1,4 @@
-// Package queue wires River (a Postgres-backed job queue) into the gateway.
-// River is the reason there's no Redis/Kafka dependency: a delivery job is
-// enqueued in the *same* Postgres transaction as the event write, so an
-// event and its delivery job are durably committed together or not at all
-// (the ack-then-process guarantee from the architecture doc).
+// Package queue wires River into gateway
 package queue
 
 import (
@@ -16,10 +12,8 @@ import (
 	"github.com/riverqueue/river/rivermigrate"
 )
 
-// Migrate creates/updates River's own tables (river_job, river_leader, ...).
-// River manages its schema separately from our goose migrations so version
-// upgrades are handled by River itself and its tables stay out of sqlc's
-// view. Call this on boot, alongside db.Migrate.
+// Migrate creates/updates River's own tables.
+// River manages its schema separately from our goose migrations
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	migrator, err := rivermigrate.New(riverpgxv5.New(pool), nil)
 	if err != nil {
@@ -31,12 +25,6 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// DeliveryArgs is the job enqueued for each (event, destination) pair that
-// needs to be delivered. It carries the delivery row's id plus a snapshot of
-// the destination's backoff config (BR-08): the retry schedule is computed from
-// these in the worker's NextRetry, so a job retries under the policy in effect
-// when it was enqueued (matching how max_attempts is fixed on the job row at
-// insert). Zero base/max means fall back to River's default retry policy.
 type DeliveryArgs struct {
 	DeliveryID         string `json:"delivery_id"`
 	BackoffBaseSeconds int32  `json:"backoff_base_seconds"`
@@ -46,6 +34,20 @@ type DeliveryArgs struct {
 // Kind is the stable job type name River persists in river_job.kind; changing
 // it would orphan already-enqueued jobs, so it is fixed.
 func (DeliveryArgs) Kind() string { return "delivery" }
+
+// InsertDeliveryJob enqueues one delivery job in the given transaction
+// and returns the new river_job id for the caller to backfill onto its delivery
+// row
+func InsertDeliveryJob(ctx context.Context, client *river.Client[pgx.Tx], tx pgx.Tx, args DeliveryArgs, maxAttempts int) (int64, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	res, err := client.InsertTx(ctx, tx, args, &river.InsertOpts{MaxAttempts: maxAttempts})
+	if err != nil {
+		return 0, fmt.Errorf("enqueuing delivery job: %w", err)
+	}
+	return res.Job.ID, nil
+}
 
 // NewInsertOnlyClient builds a River client that can only enqueue jobs, not
 // work them, ingest uses this.

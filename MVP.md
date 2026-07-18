@@ -20,7 +20,7 @@ Working model: true open-source core + paid managed cloud. Solo founder, Go back
 **Queueing & delivery**
 
 - BR-07: Durable at-least-once delivery queue; events survive process restarts.
-- BR-08: Retries with exponential backoff + jitter; configurable attempts (default ~8 over 3 days).
+- BR-08: Retries with exponential backoff + jitter for transient failures (timeout, 5xx, 429); configurable attempts (default ~16 spanning up to ~3 days). Terminal 4xx responses are not retried — they dead-letter immediately.
 - BR-09: Dead-letter state for exhausted events, with manual and bulk recovery.
 - BR-10: Per-destination rate limiting / delivery pacing (backpressure) so a slow consumer never gets overwhelmed.
 - BR-11: Configurable delivery timeout; treat slow endpoints as failures and retry.

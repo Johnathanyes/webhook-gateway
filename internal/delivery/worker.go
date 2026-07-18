@@ -19,8 +19,9 @@ import (
 
 // Delivery statuses written to deliveries.status
 const (
-	statusSucceeded = "succeeded"
-	statusFailed    = "failed"
+	statusSucceeded    = "succeeded"
+	statusFailed       = "failed"
+	statusDeadLettered = "dead_lettered"
 )
 
 // Worker executes a single delivery job
@@ -86,23 +87,43 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) e
 		return fmt.Errorf("loading destination for delivery %s: %w", job.Args.DeliveryID, err)
 	}
 
-	result := w.dispatch(ctx, dest, event)
+	result := w.dispatch(ctx, dest, event, job.Args.DeliveryID)
+	status := deliveryStatus(result, job.Attempt, job.MaxAttempts)
 
-	if err := w.recordAttempt(ctx, deliveryID, int32(job.Attempt), result); err != nil {
+	if err := w.recordAttempt(ctx, deliveryID, status, result); err != nil {
 		// The HTTP call may have succeeded, but we couldn't persist the outcome;
 		// retry so the delivery state stays truthful.
 		return fmt.Errorf("recording delivery attempt %s: %w", job.Args.DeliveryID, err)
 	}
 
-	if !result.succeeded {
+	switch {
+	case result.succeeded:
+		return nil
+	case !result.retryable:
+		return river.JobCancel(fmt.Errorf("delivery %s to %s dead-lettered: %s", job.Args.DeliveryID, dest.Url, result.errMsg.String))
+	default:
+		// Retryable failure, if final attempt, discard
 		return fmt.Errorf("delivery %s to %s failed: %s", job.Args.DeliveryID, dest.Url, result.errMsg.String)
 	}
-	return nil
+}
+
+// Maps attempt outcome by success, retryable, or nonretryable
+func deliveryStatus(r attemptResult, attempt, maxAttempts int) string {
+	switch {
+	case r.succeeded:
+		return statusSucceeded
+	case !r.retryable:
+		return statusDeadLettered
+	case attempt >= maxAttempts:
+		return statusDeadLettered
+	default:
+		return statusFailed
+	}
 }
 
 // recordAttempt persists the attempt history row and the delivery's new status
 // atomically, so the trace and the delivery state never disagree.
-func (w *Worker) recordAttempt(ctx context.Context, deliveryID pgtype.UUID, attempt int32, r attemptResult) error {
+func (w *Worker) recordAttempt(ctx context.Context, deliveryID pgtype.UUID, status string, r attemptResult) error {
 	tx, err := w.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -110,27 +131,23 @@ func (w *Worker) recordAttempt(ctx context.Context, deliveryID pgtype.UUID, atte
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	qtx := w.q.WithTx(tx)
+	attemptNumber, err := qtx.RecordDeliveryOutcome(ctx, db.RecordDeliveryOutcomeParams{
+		ID:     deliveryID,
+		Status: status,
+	})
+	if err != nil {
+		return err
+	}
+
 	if err := qtx.InsertDeliveryAttempt(ctx, db.InsertDeliveryAttemptParams{
 		DeliveryID:            deliveryID,
-		AttemptNumber:         attempt,
+		AttemptNumber:         attemptNumber,
 		RequestHeaders:        r.requestHeaders,
 		ResponseStatusCode:    r.statusCode,
 		ResponseHeaders:       r.responseHeaders,
 		ResponseBodyTruncated: r.responseBody,
 		Error:                 r.errMsg,
 		DurationMs:            r.durationMs,
-	}); err != nil {
-		return err
-	}
-
-	status := statusFailed
-	if r.succeeded {
-		status = statusSucceeded
-	}
-	if err := qtx.UpdateDeliveryOutcome(ctx, db.UpdateDeliveryOutcomeParams{
-		ID:           deliveryID,
-		Status:       status,
-		AttemptCount: attempt,
 	}); err != nil {
 		return err
 	}
