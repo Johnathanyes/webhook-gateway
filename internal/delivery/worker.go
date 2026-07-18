@@ -24,12 +24,16 @@ const (
 	statusDeadLettered = "dead_lettered"
 )
 
+// How long a delivery to a paused destination is snoozed before rechecking
+const pausedSnoozeInterval = 30 * time.Second
+
 // Worker executes a single delivery job
 type Worker struct {
 	river.WorkerDefaults[queue.DeliveryArgs]
 	pool       *pgxpool.Pool
 	q          *db.Queries
 	httpClient *http.Client
+	pacer      *pacer
 }
 
 func NewWorker(pool *pgxpool.Pool, q *db.Queries) *Worker {
@@ -37,6 +41,7 @@ func NewWorker(pool *pgxpool.Pool, q *db.Queries) *Worker {
 		pool:       pool,
 		q:          q,
 		httpClient: &http.Client{},
+		pacer:      newPacer(),
 	}
 }
 
@@ -66,15 +71,6 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) e
 		return nil
 	}
 
-	event, err := w.q.GetEventForDelivery(ctx, delivery.EventID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("event gone; dropping delivery job", "delivery_id", job.Args.DeliveryID)
-			return nil
-		}
-		return fmt.Errorf("loading event for delivery %s: %w", job.Args.DeliveryID, err)
-	}
-
 	dest, err := w.q.GetDestination(ctx, db.GetDestinationParams{
 		ID:       delivery.DestinationID,
 		TenantID: delivery.TenantID,
@@ -85,6 +81,31 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) e
 			return nil
 		}
 		return fmt.Errorf("loading destination for delivery %s: %w", job.Args.DeliveryID, err)
+	}
+
+	// Reschedule without delivering or burning an attempt.
+	if dest.PausedAt.Valid {
+		slog.Debug("destination paused; snoozing delivery", "delivery_id", job.Args.DeliveryID)
+		return river.JobSnooze(pausedSnoozeInterval)
+	}
+
+	// If the destination is over its rate, snooze for exactly the refill wait
+	var rps int32
+	if dest.RateLimitPerSecond.Valid {
+		rps = dest.RateLimitPerSecond.Int32
+	}
+	if wait := w.pacer.reserve(dest.ID.Bytes, rps); wait > 0 {
+		slog.Debug("pacing delivery", "delivery_id", job.Args.DeliveryID, "wait", wait)
+		return river.JobSnooze(wait)
+	}
+
+	event, err := w.q.GetEventForDelivery(ctx, delivery.EventID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("event gone; dropping delivery job", "delivery_id", job.Args.DeliveryID)
+			return nil
+		}
+		return fmt.Errorf("loading event for delivery %s: %w", job.Args.DeliveryID, err)
 	}
 
 	result := w.dispatch(ctx, dest, event, job.Args.DeliveryID)
