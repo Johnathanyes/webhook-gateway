@@ -40,9 +40,8 @@ func NewWorker(pool *pgxpool.Pool, q *db.Queries) *Worker {
 }
 
 // Work delivers one event to one destination. Returning an error marks the job
-// for retry (River's default backoff until BR-08 customizes it); returning nil
-// completes it. A missing delivery/event/destination is treated as nothing to
-// do rather than an infinite retry.
+// for retry, scheduled by NextRetry's per-destination backoff;
+// returning nil completes it.
 func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) error {
 	var deliveryID pgtype.UUID
 	if err := deliveryID.Scan(job.Args.DeliveryID); err != nil {

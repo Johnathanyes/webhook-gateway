@@ -97,9 +97,6 @@ type UpdateDeliveryOutcomeParams struct {
 	AttemptCount int32       `json:"attempt_count"`
 }
 
-// Records the result of a delivery attempt: the new status ('succeeded' or
-// 'failed'), the attempt count (River's attempt number), and when it ran.
-// Backoff scheduling (next_attempt_at) and dead-lettering are separate tasks.
 func (q *Queries) UpdateDeliveryOutcome(ctx context.Context, arg UpdateDeliveryOutcomeParams) error {
 	_, err := q.db.Exec(ctx, updateDeliveryOutcome, arg.ID, arg.Status, arg.AttemptCount)
 	return err

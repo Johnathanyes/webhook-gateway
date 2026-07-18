@@ -156,22 +156,31 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 // enqueueDeliveries creates one delivery row and one River job per enabled
 // route for the source
 func (h *Handler) enqueueDeliveries(ctx context.Context, qtx *db.Queries, tx pgx.Tx, tenantID, sourceID, eventID pgtype.UUID) error {
-	destIDs, err := qtx.ListEnabledDestinationIDsForSource(ctx, sourceID)
+	targets, err := qtx.ListEnabledDeliveryTargetsForSource(ctx, sourceID)
 	if err != nil {
 		return err
 	}
 
-	for _, destID := range destIDs {
+	for _, target := range targets {
 		deliveryID, err := qtx.InsertDelivery(ctx, db.InsertDeliveryParams{
 			TenantID:      tenantID,
 			EventID:       eventID,
-			DestinationID: destID,
+			DestinationID: target.DestinationID,
 		})
 		if err != nil {
 			return err
 		}
 
-		res, err := h.river.InsertTx(ctx, tx, queue.DeliveryArgs{DeliveryID: uuidString(deliveryID)}, nil)
+		// Snapshot the destination's retry policy onto the job
+		maxAttempts := int(target.MaxAttempts)
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		res, err := h.river.InsertTx(ctx, tx, queue.DeliveryArgs{
+			DeliveryID:         uuidString(deliveryID),
+			BackoffBaseSeconds: target.BackoffBaseSeconds,
+			BackoffMaxSeconds:  target.BackoffMaxSeconds,
+		}, &river.InsertOpts{MaxAttempts: maxAttempts})
 		if err != nil {
 			return err
 		}

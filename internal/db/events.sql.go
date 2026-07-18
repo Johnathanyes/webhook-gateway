@@ -21,9 +21,6 @@ type GetEventForDeliveryRow struct {
 	ContentType pgtype.Text `json:"content_type"`
 }
 
-// The bytes a delivery pushes to its destination: the verbatim payload and the
-// content type to send it under. Provider headers are intentionally not
-// forwarded (a delivery is a fresh request, not a proxy of the inbound one).
 func (q *Queries) GetEventForDelivery(ctx context.Context, id pgtype.UUID) (GetEventForDeliveryRow, error) {
 	row := q.db.QueryRow(ctx, getEventForDelivery, id)
 	var i GetEventForDeliveryRow

@@ -91,25 +91,45 @@ func (q *Queries) InsertRoute(ctx context.Context, arg InsertRouteParams) (Route
 	return i, err
 }
 
-const listEnabledDestinationIDsForSource = `-- name: ListEnabledDestinationIDsForSource :many
-SELECT destination_id FROM routes
-WHERE source_id = $1 AND enabled = true
+const listEnabledDeliveryTargetsForSource = `-- name: ListEnabledDeliveryTargetsForSource :many
+SELECT d.id AS destination_id,
+       d.max_attempts,
+       d.backoff_base_seconds,
+       d.backoff_max_seconds
+FROM routes r
+JOIN destinations d ON d.id = r.destination_id
+WHERE r.source_id = $1 AND r.enabled = true
 `
 
-// Destinations an event from this source fans out to: enabled routes only.
-func (q *Queries) ListEnabledDestinationIDsForSource(ctx context.Context, sourceID pgtype.UUID) ([]pgtype.UUID, error) {
-	rows, err := q.db.Query(ctx, listEnabledDestinationIDsForSource, sourceID)
+type ListEnabledDeliveryTargetsForSourceRow struct {
+	DestinationID      pgtype.UUID `json:"destination_id"`
+	MaxAttempts        int32       `json:"max_attempts"`
+	BackoffBaseSeconds int32       `json:"backoff_base_seconds"`
+	BackoffMaxSeconds  int32       `json:"backoff_max_seconds"`
+}
+
+// Destinations an event from this source fans out to (enabled routes only),
+// with the per-destination retry knobs the enqueue snapshots onto each delivery
+// job: max_attempts (set on the River job) and the backoff base/max (carried in
+// the job args) so retries follow the destination's policy (BR-07/08).
+func (q *Queries) ListEnabledDeliveryTargetsForSource(ctx context.Context, sourceID pgtype.UUID) ([]ListEnabledDeliveryTargetsForSourceRow, error) {
+	rows, err := q.db.Query(ctx, listEnabledDeliveryTargetsForSource, sourceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []pgtype.UUID
+	var items []ListEnabledDeliveryTargetsForSourceRow
 	for rows.Next() {
-		var destination_id pgtype.UUID
-		if err := rows.Scan(&destination_id); err != nil {
+		var i ListEnabledDeliveryTargetsForSourceRow
+		if err := rows.Scan(
+			&i.DestinationID,
+			&i.MaxAttempts,
+			&i.BackoffBaseSeconds,
+			&i.BackoffMaxSeconds,
+		); err != nil {
 			return nil, err
 		}
-		items = append(items, destination_id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

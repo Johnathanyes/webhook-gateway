@@ -32,9 +32,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // DeliveryArgs is the job enqueued for each (event, destination) pair that
-// needs to be delivered. It carries only the delivery row's id;
+// needs to be delivered. It carries the delivery row's id plus a snapshot of
+// the destination's backoff config (BR-08): the retry schedule is computed from
+// these in the worker's NextRetry, so a job retries under the policy in effect
+// when it was enqueued (matching how max_attempts is fixed on the job row at
+// insert). Zero base/max means fall back to River's default retry policy.
 type DeliveryArgs struct {
-	DeliveryID string `json:"delivery_id"`
+	DeliveryID         string `json:"delivery_id"`
+	BackoffBaseSeconds int32  `json:"backoff_base_seconds"`
+	BackoffMaxSeconds  int32  `json:"backoff_max_seconds"`
 }
 
 // Kind is the stable job type name River persists in river_job.kind; changing

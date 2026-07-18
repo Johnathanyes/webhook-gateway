@@ -37,7 +37,7 @@ type InsertDeliveryAttemptParams struct {
 	DurationMs            pgtype.Int4 `json:"duration_ms"`
 }
 
-// Records one HTTP try against a destination for the trace view
+// Records one HTTP try against a destination for the trace view.
 func (q *Queries) InsertDeliveryAttempt(ctx context.Context, arg InsertDeliveryAttemptParams) error {
 	_, err := q.db.Exec(ctx, insertDeliveryAttempt,
 		arg.DeliveryID,

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -158,9 +159,14 @@ func TestIngestTransactionalEnqueue(t *testing.T) {
 		if !d.riverJobID.Valid {
 			t.Errorf("river_job_id is NULL, want it backfilled from the enqueued job")
 		}
-		// The job must be committed in river_job, not just referenced.
-		if !riverJobExists(t, pool, d.riverJobID.Int64) {
+		// The job must be committed in river_job, not just referenced, and carry
+		// the destination's max_attempts (BR-08) rather than River's default.
+		maxAttempts, ok := riverJobMaxAttempts(t, pool, d.riverJobID.Int64)
+		if !ok {
 			t.Errorf("river_job %d not found; enqueue did not commit with the event", d.riverJobID.Int64)
+		}
+		if maxAttempts != 8 {
+			t.Errorf("river_job max_attempts = %d, want 8 (the destination's configured value)", maxAttempts)
 		}
 	})
 }
@@ -707,16 +713,21 @@ func deliveryCount(t *testing.T, pool *pgxpool.Pool, sourceID pgtype.UUID) int {
 	return n
 }
 
-func riverJobExists(t *testing.T, pool *pgxpool.Pool, jobID int64) bool {
+// riverJobMaxAttempts returns the max_attempts River persisted for the job and
+// whether the job row exists at all.
+func riverJobMaxAttempts(t *testing.T, pool *pgxpool.Pool, jobID int64) (int, bool) {
 	t.Helper()
-	var exists bool
+	var maxAttempts int
 	err := pool.QueryRow(context.Background(),
-		"SELECT EXISTS (SELECT 1 FROM river_job WHERE id = $1)", jobID,
-	).Scan(&exists)
-	if err != nil {
-		t.Fatalf("checking river_job: %v", err)
+		"SELECT max_attempts FROM river_job WHERE id = $1", jobID,
+	).Scan(&maxAttempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false
 	}
-	return exists
+	if err != nil {
+		t.Fatalf("reading river_job: %v", err)
+	}
+	return maxAttempts, true
 }
 
 func uuidStr(u pgtype.UUID) string {
