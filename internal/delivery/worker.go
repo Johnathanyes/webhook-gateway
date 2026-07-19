@@ -24,8 +24,10 @@ const (
 	statusDeadLettered = "dead_lettered"
 )
 
-// How long a delivery to a paused destination is snoozed before rechecking
-const pausedSnoozeInterval = 30 * time.Second
+// How long a delivery to a paused destination is snoozed before rechecking.
+// A var, not a const, only so integration tests can shorten it; production
+// never reassigns it.
+var pausedSnoozeInterval = 30 * time.Second
 
 // Worker executes a single delivery job
 type Worker struct {
