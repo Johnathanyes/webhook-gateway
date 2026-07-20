@@ -11,6 +11,51 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getEvent = `-- name: GetEvent :one
+SELECT id, tenant_id, source_id, raw_headers, raw_body, content_type,
+       parsed_body, dedupe_key, verified, received_at
+FROM events
+WHERE id = $1 AND tenant_id = $2
+`
+
+type GetEventParams struct {
+	ID       pgtype.UUID `json:"id"`
+	TenantID pgtype.UUID `json:"tenant_id"`
+}
+
+type GetEventRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	TenantID    pgtype.UUID        `json:"tenant_id"`
+	SourceID    pgtype.UUID        `json:"source_id"`
+	RawHeaders  []byte             `json:"raw_headers"`
+	RawBody     []byte             `json:"raw_body"`
+	ContentType pgtype.Text        `json:"content_type"`
+	ParsedBody  []byte             `json:"parsed_body"`
+	DedupeKey   pgtype.Text        `json:"dedupe_key"`
+	Verified    bool               `json:"verified"`
+	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
+}
+
+// Full event including raw headers and raw body, for the detail view and the
+// CLI's replay-to-localhost (#29).
+func (q *Queries) GetEvent(ctx context.Context, arg GetEventParams) (GetEventRow, error) {
+	row := q.db.QueryRow(ctx, getEvent, arg.ID, arg.TenantID)
+	var i GetEventRow
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.SourceID,
+		&i.RawHeaders,
+		&i.RawBody,
+		&i.ContentType,
+		&i.ParsedBody,
+		&i.DedupeKey,
+		&i.Verified,
+		&i.ReceivedAt,
+	)
+	return i, err
+}
+
 const getEventForDelivery = `-- name: GetEventForDelivery :one
 SELECT raw_body, content_type FROM events
 WHERE id = $1
@@ -77,4 +122,177 @@ func (q *Queries) InsertEvent(ctx context.Context, arg InsertEventParams) (Inser
 	var i InsertEventRow
 	err := row.Scan(&i.ID, &i.ReceivedAt)
 	return i, err
+}
+
+const listEventDeliveries = `-- name: ListEventDeliveries :many
+SELECT id, tenant_id, event_id, destination_id, river_job_id, status,
+       attempt_count, next_attempt_at, last_attempted_at, dead_lettered_at,
+       created_at, updated_at
+FROM deliveries
+WHERE event_id = $1 AND tenant_id = $2
+ORDER BY created_at
+`
+
+type ListEventDeliveriesParams struct {
+	EventID  pgtype.UUID `json:"event_id"`
+	TenantID pgtype.UUID `json:"tenant_id"`
+}
+
+// Every delivery spawned from an event, for the trace view.
+func (q *Queries) ListEventDeliveries(ctx context.Context, arg ListEventDeliveriesParams) ([]Delivery, error) {
+	rows, err := q.db.Query(ctx, listEventDeliveries, arg.EventID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Delivery
+	for rows.Next() {
+		var i Delivery
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.EventID,
+			&i.DestinationID,
+			&i.RiverJobID,
+			&i.Status,
+			&i.AttemptCount,
+			&i.NextAttemptAt,
+			&i.LastAttemptedAt,
+			&i.DeadLetteredAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEventDeliveryAttempts = `-- name: ListEventDeliveryAttempts :many
+SELECT da.id, da.delivery_id, da.attempt_number, da.request_headers,
+       da.response_status_code, da.response_headers, da.response_body_truncated,
+       da.error, da.duration_ms, da.attempted_at
+FROM delivery_attempts da
+JOIN deliveries d ON d.id = da.delivery_id
+WHERE d.event_id = $1 AND d.tenant_id = $2
+ORDER BY da.delivery_id, da.attempt_number
+`
+
+type ListEventDeliveryAttemptsParams struct {
+	EventID  pgtype.UUID `json:"event_id"`
+	TenantID pgtype.UUID `json:"tenant_id"`
+}
+
+// Every HTTP attempt across all of an event's deliveries, flattened and
+// ordered so the handler can group by delivery_id for the timeline.
+func (q *Queries) ListEventDeliveryAttempts(ctx context.Context, arg ListEventDeliveryAttemptsParams) ([]DeliveryAttempt, error) {
+	rows, err := q.db.Query(ctx, listEventDeliveryAttempts, arg.EventID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DeliveryAttempt
+	for rows.Next() {
+		var i DeliveryAttempt
+		if err := rows.Scan(
+			&i.ID,
+			&i.DeliveryID,
+			&i.AttemptNumber,
+			&i.RequestHeaders,
+			&i.ResponseStatusCode,
+			&i.ResponseHeaders,
+			&i.ResponseBodyTruncated,
+			&i.Error,
+			&i.DurationMs,
+			&i.AttemptedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEvents = `-- name: ListEvents :many
+SELECT id, tenant_id, source_id, content_type, dedupe_key, verified, received_at
+FROM events e
+WHERE e.tenant_id = $1
+  AND ($2::uuid IS NULL OR e.source_id = $2)
+  AND ($3::boolean IS NULL OR e.verified = $3)
+  AND ($4::timestamptz IS NULL OR e.received_at >= $4)
+  AND ($5::timestamptz IS NULL OR e.received_at <= $5)
+  AND ($6::text IS NULL OR e.search_vector @@ websearch_to_tsquery('english', $6))
+  AND ($7::text IS NULL OR EXISTS (
+      SELECT 1 FROM deliveries d WHERE d.event_id = e.id AND d.status = $7))
+  AND ($8::uuid IS NULL OR e.id < $8)
+ORDER BY e.id DESC
+LIMIT $9
+`
+
+type ListEventsParams struct {
+	TenantID       pgtype.UUID        `json:"tenant_id"`
+	SourceID       pgtype.UUID        `json:"source_id"`
+	Verified       pgtype.Bool        `json:"verified"`
+	After          pgtype.Timestamptz `json:"after"`
+	Before         pgtype.Timestamptz `json:"before"`
+	Search         pgtype.Text        `json:"search"`
+	DeliveryStatus pgtype.Text        `json:"delivery_status"`
+	Cursor         pgtype.UUID        `json:"cursor"`
+	PageLimit      int32              `json:"page_limit"`
+}
+
+type ListEventsRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	TenantID    pgtype.UUID        `json:"tenant_id"`
+	SourceID    pgtype.UUID        `json:"source_id"`
+	ContentType pgtype.Text        `json:"content_type"`
+	DedupeKey   pgtype.Text        `json:"dedupe_key"`
+	Verified    bool               `json:"verified"`
+	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
+}
+
+// Event log listing for the observability API
+func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error) {
+	rows, err := q.db.Query(ctx, listEvents,
+		arg.TenantID,
+		arg.SourceID,
+		arg.Verified,
+		arg.After,
+		arg.Before,
+		arg.Search,
+		arg.DeliveryStatus,
+		arg.Cursor,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEventsRow
+	for rows.Next() {
+		var i ListEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.SourceID,
+			&i.ContentType,
+			&i.DedupeKey,
+			&i.Verified,
+			&i.ReceivedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

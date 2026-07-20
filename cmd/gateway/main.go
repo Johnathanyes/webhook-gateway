@@ -115,7 +115,8 @@ func run() error {
 		api.RegisterDestinations(mux, q, cfg.AdminPassword)
 		api.RegisterRoutes(mux, q, cfg.AdminPassword)
 		api.RegisterDeliveries(mux, pool, q, insertClient, cfg.AdminPassword)
-		slog.Info("destinations, routes, and deliveries API mounted")
+		api.RegisterEvents(mux, q, cfg.AdminPassword)
+		slog.Info("destinations, routes, deliveries, and events API mounted")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {

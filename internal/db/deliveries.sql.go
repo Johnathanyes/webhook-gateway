@@ -53,10 +53,6 @@ type InsertDeliveryParams struct {
 	DestinationID pgtype.UUID `json:"destination_id"`
 }
 
-// Creates the pending delivery for an (event, destination) pair produced by
-// fan-out at ingest. status defaults to 'pending' and attempt_count to 0; the
-// River job that drives it is enqueued in the same transaction and its id
-// backfilled via SetDeliveryRiverJobID.
 func (q *Queries) InsertDelivery(ctx context.Context, arg InsertDeliveryParams) (pgtype.UUID, error) {
 	row := q.db.QueryRow(ctx, insertDelivery, arg.TenantID, arg.EventID, arg.DestinationID)
 	var id pgtype.UUID
@@ -80,8 +76,6 @@ type RecordDeliveryOutcomeParams struct {
 	Status string      `json:"status"`
 }
 
-// Applies the result of one attempt. Returns the new attempt_count
-// to number the delivery_attempts row.
 func (q *Queries) RecordDeliveryOutcome(ctx context.Context, arg RecordDeliveryOutcomeParams) (int32, error) {
 	row := q.db.QueryRow(ctx, recordDeliveryOutcome, arg.ID, arg.Status)
 	var attempt_count int32
@@ -98,10 +92,6 @@ SET status = 'pending',
 WHERE id = $1
 `
 
-// Returns a dead-lettered delivery to the queue for a fresh set of attempts.
-// attempt_count is intentionally left as-is so the
-// attempt history stays continuous; the re-enqueued River job gets its own
-// fresh retry budget.
 func (q *Queries) ResetDeliveryForRecovery(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, resetDeliveryForRecovery, id)
 	return err
