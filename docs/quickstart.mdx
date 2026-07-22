@@ -1,0 +1,31 @@
+---
+title: "Quickstart"
+description: "Run the gateway and deliver your first event."
+---
+
+## Run locally
+
+```bash
+docker compose up -d      # Postgres + dependencies
+make run                  # start the gateway
+```
+
+The gateway listens on `:8080` by default. Confirm it's healthy:
+
+```bash
+curl localhost:8080/health
+```
+
+## Authenticate to the admin API
+
+All `/api/*` endpoints require the admin password via HTTP basic auth.
+
+```bash
+curl -u admin:$ADMIN_PASSWORD localhost:8080/api/events
+```
+
+## Next steps
+
+<Card title="Create a source" icon="inbox" href="/concepts/sources">
+  Register a provider endpoint and start verifying webhooks.
+</Card>

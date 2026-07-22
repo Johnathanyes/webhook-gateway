@@ -1,0 +1,26 @@
+---
+title: "Introduction"
+description: "A self-hosted gateway for ingesting, verifying, and reliably delivering webhooks."
+---
+
+## What is webhook-gateway?
+
+webhook-gateway ingests inbound webhooks from providers (Stripe, GitHub, and
+others), verifies their signatures, and reliably fans them out to your own
+destinations with retries, dead-lettering, rate limiting, and replay.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run the gateway locally and deliver your first event.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/events">
+    The admin API for sources, destinations, routes, and deliveries.
+  </Card>
+</CardGroup>
+
+## Core concepts
+
+- **Sources** — inbound endpoints that receive and verify provider webhooks.
+- **Destinations** — where verified events get delivered.
+- **Routes** — rules that map sources to destinations.
+- **Deliveries** — individual attempts, with retries and dead-lettering.

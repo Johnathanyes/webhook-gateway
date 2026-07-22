@@ -1,0 +1,56 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "webhook-gateway",
+  "colors": {
+    "primary": "#0F766E",
+    "light": "#2DD4BF",
+    "dark": "#0F766E"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": ["index", "quickstart"]
+          },
+          {
+            "group": "Concepts",
+            "pages": ["concepts/sources", "concepts/destinations", "concepts/routes", "concepts/deliveries"]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Admin API",
+            "pages": [
+              "api-reference/events",
+              "api-reference/sources",
+              "api-reference/destinations",
+              "api-reference/routes",
+              "api-reference/deliveries",
+              "api-reference/replays"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": ["api-reference/health", "api-reference/metrics"]
+          }
+        ]
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/Johnathanyes/webhook-gateway"
+      }
+    ]
+  }
+}
