@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"webhook-gateway/internal/alerting"
 	"webhook-gateway/internal/api"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
@@ -77,6 +79,7 @@ func newHarness(t *testing.T) *harness {
 	ingest.Register(mux, pool, q, insertClient, enc, catalog,
 		ingest.Options{MaxBodyBytes: 1 << 20, RateLimitPerSecond: 1000})
 	api.RegisterDeliveries(mux, pool, q, insertClient, testAdminPassword)
+	api.RegisterReplay(mux, pool, q, insertClient, testAdminPassword)
 
 	return &harness{pool: pool, q: q, mux: mux, insertClient: insertClient}
 }
@@ -194,6 +197,56 @@ func (h *harness) recover(t *testing.T, deliveryID pgtype.UUID) int {
 	rec := httptest.NewRecorder()
 	h.mux.ServeHTTP(rec, req)
 	return rec.Code
+}
+
+func (h *harness) replayEvent(t *testing.T, eventID pgtype.UUID) int {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/events/"+uuidStr(eventID)+"/replay", nil)
+	req.Header.Set("Authorization", "Bearer "+testAdminPassword)
+	rec := httptest.NewRecorder()
+	h.mux.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// bulkReplay posts a filter to /api/replays and returns the new replay id.
+func (h *harness) bulkReplay(t *testing.T, filterJSON string) pgtype.UUID {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/replays", strings.NewReader(filterJSON))
+	req.Header.Set("Authorization", "Bearer "+testAdminPassword)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("bulk replay returned %d, want 202; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding replay response: %v", err)
+	}
+	var id pgtype.UUID
+	if err := id.Scan(resp.ID); err != nil {
+		t.Fatalf("parsing replay id %q: %v", resp.ID, err)
+	}
+	return id
+}
+
+type replayRow struct {
+	status   string
+	matched  int32
+	requeued int32
+}
+
+func replayState(t *testing.T, pool *pgxpool.Pool, replayID pgtype.UUID) replayRow {
+	t.Helper()
+	var r replayRow
+	if err := pool.QueryRow(context.Background(),
+		"SELECT status, coalesce(matched_count, -1), coalesce(requeued_count, -1) FROM replays WHERE id = $1",
+		replayID).Scan(&r.status, &r.matched, &r.requeued); err != nil {
+		t.Fatalf("query replay: %v", err)
+	}
+	return r
 }
 
 // ---- recording destination server -------------------------------------------
@@ -424,6 +477,154 @@ func TestPipelineRecover(t *testing.T) {
 	final := deliveriesForEvent(t, h.pool, eventID)[0]
 	if final.attemptCount < 2 {
 		t.Errorf("attempt_count = %d, want >= 2 (history continued across recovery)", final.attemptCount)
+	}
+}
+
+// BR-18 (single replay): replaying a delivered event creates a fresh delivery
+// with a new Webhook-Id that runs through the normal path and delivers again.
+func TestPipelineReplaySingle(t *testing.T) {
+	h := newHarness(t)
+	h.startWorker(t)
+
+	dest := newRecordingServer(t, alwaysStatus(200))
+	src := h.createSource(t)
+	d := h.createDestination(t, dest.srv.URL, destOpts{})
+	h.route(t, src, d)
+
+	eventID := h.postEvent(t, src, `{"hello":"replay"}`)
+	eventually(t, 15*time.Second, "original delivery succeeds", func() bool {
+		ds := deliveriesForEvent(t, h.pool, eventID)
+		return len(ds) == 1 && ds[0].status == statusSucceeded
+	})
+	firstWebhookID := dest.lastWebhookID()
+
+	if code := h.replayEvent(t, eventID); code != http.StatusAccepted {
+		t.Fatalf("replay returned %d, want 202", code)
+	}
+
+	// A second, distinct delivery appears and is delivered.
+	eventually(t, 15*time.Second, "replayed delivery succeeds", func() bool {
+		ds := deliveriesForEvent(t, h.pool, eventID)
+		return len(ds) == 2 && ds[0].status == statusSucceeded && ds[1].status == statusSucceeded
+	})
+	if dest.count() != 2 {
+		t.Errorf("destination calls = %d, want 2", dest.count())
+	}
+	if got := dest.lastWebhookID(); got == "" || got == firstWebhookID {
+		t.Errorf("replay Webhook-Id = %q, want a new id distinct from %q", got, firstWebhookID)
+	}
+}
+
+// BR-18 (bulk replay): a filtered bulk replay requeues exactly the matched set
+// via a River job and the replay row completes with correct counts.
+func TestPipelineReplayBulk(t *testing.T) {
+	h := newHarness(t)
+	h.startWorker(t)
+
+	dest := newRecordingServer(t, alwaysStatus(200))
+	src := h.createSource(t)
+	d := h.createDestination(t, dest.srv.URL, destOpts{})
+	h.route(t, src, d)
+
+	const n = 3
+	var eventIDs []pgtype.UUID
+	for range n {
+		eventIDs = append(eventIDs, h.postEvent(t, src, `{"hello":"bulk"}`))
+	}
+	eventually(t, 20*time.Second, "all original deliveries succeed", func() bool {
+		return dest.count() == n
+	})
+
+	replayID := h.bulkReplay(t, `{"source_id":"`+uuidStr(src.ID)+`"}`)
+
+	eventually(t, 20*time.Second, "bulk replay completes", func() bool {
+		return replayState(t, h.pool, replayID).status == statusReplayCompleted
+	})
+	rs := replayState(t, h.pool, replayID)
+	if rs.matched != n || rs.requeued != n {
+		t.Errorf("replay counts matched=%d requeued=%d, want %d/%d", rs.matched, rs.requeued, n, n)
+	}
+
+	// Each event now has two deliveries (original + replay), all delivered.
+	eventually(t, 20*time.Second, "every event has two succeeded deliveries", func() bool {
+		for _, eid := range eventIDs {
+			ds := deliveriesForEvent(t, h.pool, eid)
+			if len(ds) != 2 || ds[0].status != statusSucceeded || ds[1].status != statusSucceeded {
+				return false
+			}
+		}
+		return true
+	})
+	if dest.count() != 2*n {
+		t.Errorf("destination calls = %d, want %d", dest.count(), 2*n)
+	}
+}
+
+// fakeNotifier records the alerts it is asked to send, for the alerting test.
+type fakeNotifier struct {
+	mu     sync.Mutex
+	alerts []alerting.Alert
+}
+
+func (f *fakeNotifier) Notify(_ context.Context, a alerting.Alert) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alerts = append(f.alerts, a)
+	return nil
+}
+
+func (f *fakeNotifier) countFor(destID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, a := range f.alerts {
+		if a.DestinationID == destID {
+			n++
+		}
+	}
+	return n
+}
+
+// BR-19: a dead-lettered delivery fires exactly one alert, and a second
+// evaluation within the cooldown fires no more.
+func TestPipelineAlertOnDeadLetter(t *testing.T) {
+	h := newHarness(t)
+	h.startWorker(t)
+
+	dest := newRecordingServer(t, alwaysStatus(500))
+	src := h.createSource(t)
+	d := h.createDestination(t, dest.srv.URL, destOpts{maxAttempts: 1})
+	h.route(t, src, d)
+
+	eventID := h.postEvent(t, src, `{"hello":"alert"}`)
+	eventually(t, 15*time.Second, "delivery dead-letters", func() bool {
+		ds := deliveriesForEvent(t, h.pool, eventID)
+		return len(ds) == 1 && ds[0].status == statusDeadLettered
+	})
+
+	fake := &fakeNotifier{}
+	// DLQ condition only (FailureThreshold 0), long cooldown so the repeat is
+	// suppressed, window wide enough to catch the just-created dead-letter.
+	cfg := alerting.Config{Enabled: true, CooldownMinutes: 60, WindowMinutes: 60, MinDeliveries: 20}
+	ev := alerting.NewEvaluator(h.q, cfg, fake)
+
+	destID := uuidStr(d.ID)
+	if err := ev.Run(context.Background()); err != nil {
+		t.Fatalf("first evaluation: %v", err)
+	}
+	if got := fake.countFor(destID); got != 1 {
+		t.Fatalf("alerts for destination after first run = %d, want 1", got)
+	}
+	if c := fake.alerts[len(fake.alerts)-1].Condition; c != "dlq" {
+		t.Errorf("alert condition = %q, want dlq", c)
+	}
+
+	// Second run within the cooldown must not re-alert.
+	if err := ev.Run(context.Background()); err != nil {
+		t.Fatalf("second evaluation: %v", err)
+	}
+	if got := fake.countFor(destID); got != 1 {
+		t.Errorf("alerts for destination after second run = %d, want 1 (cooldown)", got)
 	}
 }
 

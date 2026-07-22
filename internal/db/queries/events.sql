@@ -17,6 +17,20 @@ WHERE e.tenant_id = $1
 ORDER BY e.id DESC
 LIMIT sqlc.arg('page_limit');
 
+-- name: ListEventsForReplay :many
+-- Every event matching a bulk-replay filter
+SELECT id, source_id
+FROM events e
+WHERE e.tenant_id = $1
+  AND (sqlc.narg('source_id')::uuid IS NULL OR e.source_id = sqlc.narg('source_id'))
+  AND (sqlc.narg('verified')::boolean IS NULL OR e.verified = sqlc.narg('verified'))
+  AND (sqlc.narg('after')::timestamptz IS NULL OR e.received_at >= sqlc.narg('after'))
+  AND (sqlc.narg('before')::timestamptz IS NULL OR e.received_at <= sqlc.narg('before'))
+  AND (sqlc.narg('search')::text IS NULL OR e.search_vector @@ websearch_to_tsquery('english', sqlc.narg('search')))
+  AND (sqlc.narg('delivery_status')::text IS NULL OR EXISTS (
+      SELECT 1 FROM deliveries d WHERE d.event_id = e.id AND d.status = sqlc.narg('delivery_status')))
+ORDER BY e.id;
+
 -- name: GetEvent :one
 -- Full event including raw headers and raw body, for the detail view and the
 -- CLI's replay-to-localhost.

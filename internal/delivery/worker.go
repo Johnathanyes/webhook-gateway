@@ -13,7 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
+	"webhook-gateway/internal/alerting"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
 )
 
@@ -118,6 +120,7 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) e
 		// retry so the delivery state stays truthful.
 		return fmt.Errorf("recording delivery attempt %s: %w", job.Args.DeliveryID, err)
 	}
+	observability.RecordDelivery(status, result.durationMs.Int32)
 
 	switch {
 	case result.succeeded:
@@ -178,11 +181,23 @@ func (w *Worker) recordAttempt(ctx context.Context, deliveryID pgtype.UUID, stat
 	return tx.Commit(ctx)
 }
 
-// NewClient builds the work-capable River client for the worker role.
+// NewClient builds the work-capable River client for the worker role. It
+// registers the delivery, replay, and alert-check workers, and schedules the
+// alert evaluation to run once a minute.
 func NewClient(pool *pgxpool.Pool, q *db.Queries) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
 	river.AddWorker(workers, NewWorker(pool, q))
-	return queue.NewWorkerClient(pool, workers)
+	river.AddWorker(workers, NewReplayWorker(pool, q))
+	river.AddWorker(workers, alerting.NewCheckWorker(q))
+
+	periodic := []*river.PeriodicJob{
+		river.NewPeriodicJob(
+			river.PeriodicInterval(time.Minute),
+			func() (river.JobArgs, *river.InsertOpts) { return queue.AlertCheckArgs{}, nil },
+			&river.PeriodicJobOpts{},
+		),
+	}
+	return queue.NewWorkerClient(pool, workers, periodic)
 }
 
 // defaultTimeout guards against a destination row with a non-positive

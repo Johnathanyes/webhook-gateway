@@ -1,10 +1,8 @@
 package ingest
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -15,6 +13,7 @@ import (
 
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
 )
@@ -24,9 +23,7 @@ type Options struct {
 	RateLimitPerSecond int   // per-source token-bucket rate; also the burst
 }
 
-// Handler stores inbound webhooks. It holds the pool directly (not just
-// Queries) because the insert runs in an explicit transaction so the delivery
-// fan-out and its River jobs commit atomically with the event (BR-07).
+// Handler stores inbound webhooks.
 type Handler struct {
 	pool         *pgxpool.Pool
 	q            *db.Queries
@@ -127,7 +124,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		RawBody:     body,
 		ContentType: pgtype.Text{String: contentType, Valid: contentType != ""},
 		ParsedBody:  parsedBody,
-		DedupeKey:   pgtype.Text{}, // dedupe is Phase 3
+		DedupeKey:   pgtype.Text{},
 		Verified:    verified,
 	})
 	if err != nil {
@@ -137,7 +134,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fan out to every destination this source is routed to
-	if err := h.enqueueDeliveries(ctx, qtx, tx, source.TenantID, source.ID, event.ID); err != nil {
+	if _, err := queue.EnqueueDeliveries(ctx, h.river, tx, qtx, source.TenantID, source.ID, event.ID); err != nil {
 		slog.Error("enqueuing deliveries", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -148,48 +145,10 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	observability.RecordEventIngested(verified)
 
 	// Ack only after the commit: the event is durable before the provider hears 200.
 	writeJSON(w, http.StatusOK, map[string]bool{"received": true})
-}
-
-// enqueueDeliveries creates one delivery row and one River job per enabled
-// route for the source
-func (h *Handler) enqueueDeliveries(ctx context.Context, qtx *db.Queries, tx pgx.Tx, tenantID, sourceID, eventID pgtype.UUID) error {
-	targets, err := qtx.ListEnabledDeliveryTargetsForSource(ctx, sourceID)
-	if err != nil {
-		return err
-	}
-
-	for _, target := range targets {
-		deliveryID, err := qtx.InsertDelivery(ctx, db.InsertDeliveryParams{
-			TenantID:      tenantID,
-			EventID:       eventID,
-			DestinationID: target.DestinationID,
-		})
-		if err != nil {
-			return err
-		}
-
-		// Snapshot the destination's retry policy onto the job (BR-08): the
-		// backoff base/max ride in the args, max_attempts caps River's retries.
-		jobID, err := queue.InsertDeliveryJob(ctx, h.river, tx, queue.DeliveryArgs{
-			DeliveryID:         uuidString(deliveryID),
-			BackoffBaseSeconds: target.BackoffBaseSeconds,
-			BackoffMaxSeconds:  target.BackoffMaxSeconds,
-		}, int(target.MaxAttempts))
-		if err != nil {
-			return err
-		}
-
-		if err := qtx.SetDeliveryRiverJobID(ctx, db.SetDeliveryRiverJobIDParams{
-			ID:         deliveryID,
-			RiverJobID: pgtype.Int8{Int64: jobID, Valid: true},
-		}); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // verify runs the source's provider verifier and reports whether the signature
@@ -235,9 +194,4 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
-}
-
-func uuidString(u pgtype.UUID) string {
-	b := u.Bytes
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -37,7 +37,7 @@ type GetEventRow struct {
 }
 
 // Full event including raw headers and raw body, for the detail view and the
-// CLI's replay-to-localhost (#29).
+// CLI's replay-to-localhost.
 func (q *Queries) GetEvent(ctx context.Context, arg GetEventParams) (GetEventRow, error) {
 	row := q.db.QueryRow(ctx, getEvent, arg.ID, arg.TenantID)
 	var i GetEventRow
@@ -258,7 +258,6 @@ type ListEventsRow struct {
 	ReceivedAt  pgtype.Timestamptz `json:"received_at"`
 }
 
-// Event log listing for the observability API
 func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListEventsRow, error) {
 	rows, err := q.db.Query(ctx, listEvents,
 		arg.TenantID,
@@ -287,6 +286,64 @@ func (q *Queries) ListEvents(ctx context.Context, arg ListEventsParams) ([]ListE
 			&i.Verified,
 			&i.ReceivedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listEventsForReplay = `-- name: ListEventsForReplay :many
+SELECT id, source_id
+FROM events e
+WHERE e.tenant_id = $1
+  AND ($2::uuid IS NULL OR e.source_id = $2)
+  AND ($3::boolean IS NULL OR e.verified = $3)
+  AND ($4::timestamptz IS NULL OR e.received_at >= $4)
+  AND ($5::timestamptz IS NULL OR e.received_at <= $5)
+  AND ($6::text IS NULL OR e.search_vector @@ websearch_to_tsquery('english', $6))
+  AND ($7::text IS NULL OR EXISTS (
+      SELECT 1 FROM deliveries d WHERE d.event_id = e.id AND d.status = $7))
+ORDER BY e.id
+`
+
+type ListEventsForReplayParams struct {
+	TenantID       pgtype.UUID        `json:"tenant_id"`
+	SourceID       pgtype.UUID        `json:"source_id"`
+	Verified       pgtype.Bool        `json:"verified"`
+	After          pgtype.Timestamptz `json:"after"`
+	Before         pgtype.Timestamptz `json:"before"`
+	Search         pgtype.Text        `json:"search"`
+	DeliveryStatus pgtype.Text        `json:"delivery_status"`
+}
+
+type ListEventsForReplayRow struct {
+	ID       pgtype.UUID `json:"id"`
+	SourceID pgtype.UUID `json:"source_id"`
+}
+
+// Every event matching a bulk-replay filter
+func (q *Queries) ListEventsForReplay(ctx context.Context, arg ListEventsForReplayParams) ([]ListEventsForReplayRow, error) {
+	rows, err := q.db.Query(ctx, listEventsForReplay,
+		arg.TenantID,
+		arg.SourceID,
+		arg.Verified,
+		arg.After,
+		arg.Before,
+		arg.Search,
+		arg.DeliveryStatus,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListEventsForReplayRow
+	for rows.Next() {
+		var i ListEventsForReplayRow
+		if err := rows.Scan(&i.ID, &i.SourceID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

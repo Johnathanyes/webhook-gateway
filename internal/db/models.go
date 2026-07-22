@@ -8,6 +8,12 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AlertState struct {
+	DestinationID pgtype.UUID        `json:"destination_id"`
+	Condition     string             `json:"condition"`
+	LastFiredAt   pgtype.Timestamptz `json:"last_fired_at"`
+}
+
 type ApiKey struct {
 	ID         pgtype.UUID        `json:"id"`
 	TenantID   pgtype.UUID        `json:"tenant_id"`

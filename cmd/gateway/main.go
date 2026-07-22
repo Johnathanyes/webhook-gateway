@@ -1,7 +1,4 @@
-// Command gateway is the single binary that runs the webhook gateway. All
-// logical roles (ingest, worker, dashboard) live in this one process and are
-// selected by config; a self-hoster runs them together, cloud splits them by
-// setting ROLE per deployment.
+// Command gateway is the single binary that runs the webhook gateway
 package main
 
 import (
@@ -71,9 +68,10 @@ func run() error {
 	slog.Info("migrations applied")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.HandleFunc("GET /health", observability.Health)
+	mux.HandleFunc("GET /readyz", observability.Readyz(pool))
+	mux.Handle("GET /metrics", observability.MetricsHandler())
+	observability.RegisterRuntimeGauges(pool)
 
 	// Ingest and the sources API run in the ingest and all roles. They share one
 	// catalog and encryptor so the sources API only creates sources
@@ -116,7 +114,8 @@ func run() error {
 		api.RegisterRoutes(mux, q, cfg.AdminPassword)
 		api.RegisterDeliveries(mux, pool, q, insertClient, cfg.AdminPassword)
 		api.RegisterEvents(mux, q, cfg.AdminPassword)
-		slog.Info("destinations, routes, deliveries, and events API mounted")
+		api.RegisterReplay(mux, pool, q, insertClient, cfg.AdminPassword)
+		slog.Info("destinations, routes, deliveries, events, and replay API mounted")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {
