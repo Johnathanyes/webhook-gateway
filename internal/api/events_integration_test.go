@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/tenancy"
 )
@@ -56,7 +57,7 @@ func TestEventsAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterEvents(mux, q, adminPassword)
+	RegisterEvents(mux, q, middleware.NewAuth(q, adminPassword))
 
 	get := func(path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -226,7 +227,7 @@ func TestEventTraceAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterEvents(mux, q, adminPassword)
+	RegisterEvents(mux, q, middleware.NewAuth(q, adminPassword))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events/"+uuidString(ev.ID)+"/trace", nil)
 	req.Header.Set("Authorization", "Bearer "+adminPassword)

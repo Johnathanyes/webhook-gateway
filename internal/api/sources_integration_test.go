@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/sourcedef"
@@ -35,7 +36,7 @@ func TestSourcesAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterSources(mux, q, enc, catalog, adminPassword)
+	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword))
 
 	const secret = "whsec_super_secret_value"
 

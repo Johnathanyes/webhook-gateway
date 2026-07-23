@@ -11,17 +11,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
-	"webhook-gateway/internal/auth"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/tenancy"
 )
 
-func RegisterReplay(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], adminPassword string) {
+func RegisterReplay(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], authz *middleware.Auth) {
 	h := &replayHandler{pool: pool, q: q, river: riverClient}
-	mux.Handle("POST /api/events/{id}/replay", auth.AdminOnly(adminPassword, http.HandlerFunc(h.replayEvent)))
-	mux.Handle("POST /api/replays", auth.AdminOnly(adminPassword, http.HandlerFunc(h.bulkReplay)))
-	mux.Handle("GET /api/replays/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.getReplay)))
+	mux.Handle("POST /api/events/{id}/replay", authz.RequireScope(middleware.ScopeReplay, http.HandlerFunc(h.replayEvent)))
+	mux.Handle("POST /api/replays", authz.RequireScope(middleware.ScopeReplay, http.HandlerFunc(h.bulkReplay)))
+	mux.Handle("GET /api/replays/{id}", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.getReplay)))
 }
 
 type replayHandler struct {

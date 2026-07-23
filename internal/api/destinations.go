@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"webhook-gateway/internal/auth"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/tenancy"
 )
@@ -27,15 +27,16 @@ const (
 
 // RegisterDestinations mounts the destinations CRUD + pause/resume API on mux,
 // guarded by the admin password.
-func RegisterDestinations(mux *http.ServeMux, q *db.Queries, adminPassword string) {
+func RegisterDestinations(mux *http.ServeMux, q *db.Queries, authz *middleware.Auth) {
 	h := &destinationsHandler{q: q}
-	mux.Handle("POST /api/destinations", auth.AdminOnly(adminPassword, http.HandlerFunc(h.create)))
-	mux.Handle("GET /api/destinations", auth.AdminOnly(adminPassword, http.HandlerFunc(h.list)))
-	mux.Handle("GET /api/destinations/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.get)))
-	mux.Handle("PATCH /api/destinations/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.update)))
-	mux.Handle("DELETE /api/destinations/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.delete)))
-	mux.Handle("POST /api/destinations/{id}/pause", auth.AdminOnly(adminPassword, http.HandlerFunc(h.pause)))
-	mux.Handle("POST /api/destinations/{id}/resume", auth.AdminOnly(adminPassword, http.HandlerFunc(h.resume)))
+	mux.Handle("POST /api/destinations", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.create)))
+	mux.Handle("GET /api/destinations", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
+	mux.Handle("GET /api/destinations/{id}", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.get)))
+	mux.Handle("PATCH /api/destinations/{id}", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.update)))
+	mux.Handle("DELETE /api/destinations/{id}", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.delete)))
+	mux.Handle("POST /api/destinations/{id}/pause", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.pause)))
+	mux.Handle("POST /api/destinations/{id}/resume", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.resume)))
+
 }
 
 type destinationsHandler struct {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 )
 
@@ -20,7 +21,7 @@ func TestDestinationsAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterDestinations(mux, q, adminPassword)
+	RegisterDestinations(mux, q, middleware.NewAuth(q, adminPassword))
 
 	authed := func(method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))

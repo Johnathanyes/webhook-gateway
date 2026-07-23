@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"webhook-gateway/internal/auth"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/tenancy"
 )
@@ -18,12 +18,13 @@ import (
 // RegisterRoutes mounts the routes CRUD API on mux, guarded by the admin
 // password. A route is the many-to-many binding between a source and a
 // destination that gives fan-out/fan-in for free.
-func RegisterRoutes(mux *http.ServeMux, q *db.Queries, adminPassword string) {
+func RegisterRoutes(mux *http.ServeMux, q *db.Queries, authz *middleware.Auth) {
 	h := &routesHandler{q: q}
-	mux.Handle("POST /api/routes", auth.AdminOnly(adminPassword, http.HandlerFunc(h.create)))
-	mux.Handle("GET /api/routes", auth.AdminOnly(adminPassword, http.HandlerFunc(h.list)))
-	mux.Handle("PATCH /api/routes/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.update)))
-	mux.Handle("DELETE /api/routes/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.delete)))
+	mux.Handle("POST /api/routes", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.create)))
+	mux.Handle("GET /api/routes", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
+	mux.Handle("PATCH /api/routes/{id}", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.update)))
+	mux.Handle("DELETE /api/routes/{id}", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.delete)))
+
 }
 
 type routesHandler struct {

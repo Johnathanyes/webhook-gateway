@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/tenancy"
@@ -27,7 +28,7 @@ func TestDeliveriesRecoverAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterDeliveries(mux, pool, q, insertClient, adminPassword)
+	RegisterDeliveries(mux, pool, q, insertClient, middleware.NewAuth(q, adminPassword))
 
 	recover := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/deliveries/"+id+"/recover", nil)

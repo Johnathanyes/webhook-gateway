@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"webhook-gateway/internal/auth"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/tenancy"
 )
@@ -27,11 +27,11 @@ var validDeliveryStatuses = map[string]bool{
 }
 
 // Mounts read-only events/observability API on mux
-func RegisterEvents(mux *http.ServeMux, q *db.Queries, adminPassword string) {
+func RegisterEvents(mux *http.ServeMux, q *db.Queries, authz *middleware.Auth) {
 	h := &eventsHandler{q: q}
-	mux.Handle("GET /api/events", auth.AdminOnly(adminPassword, http.HandlerFunc(h.list)))
-	mux.Handle("GET /api/events/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.get)))
-	mux.Handle("GET /api/events/{id}/trace", auth.AdminOnly(adminPassword, http.HandlerFunc(h.trace)))
+	mux.Handle("GET /api/events", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
+	mux.Handle("GET /api/events/{id}", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.get)))
+	mux.Handle("GET /api/events/{id}/trace", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.trace)))
 }
 
 type eventsHandler struct {

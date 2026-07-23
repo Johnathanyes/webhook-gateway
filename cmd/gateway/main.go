@@ -22,6 +22,7 @@ import (
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
+	"webhook-gateway/internal/api/middleware"
 )
 
 func main() {
@@ -56,9 +57,7 @@ func run() error {
 	defer pool.Close()
 	slog.Info("database pool ready")
 
-	// Both migration sets run on boot (BR-30): our schema via goose, River's
-	// own tables via its migrator. Order between them is irrelevant since no
-	// table foreign-keys into river_job.
+	// Both migration sets run on boot
 	if err := db.Migrate(ctx, cfg.DatabaseURL); err != nil {
 		return err
 	}
@@ -86,6 +85,7 @@ func run() error {
 			return fmt.Errorf("loading source catalog: %w", err)
 		}
 		q := db.New(pool)
+		authz := middleware.NewAuth(q, cfg.AdminPassword)
 
 		// Insert-only River client: ingest enqueues delivery jobs in the event's
 		// tx but never works them
@@ -94,7 +94,7 @@ func run() error {
 			return err
 		}
 
-		api.RegisterSources(mux, q, enc, catalog, cfg.AdminPassword)
+		api.RegisterSources(mux, q, enc, catalog, authz)
 		ingest.Register(mux, pool, q, insertClient, enc, catalog, ingest.Options{
 			MaxBodyBytes:       cfg.IngestMaxBodyBytes,
 			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
@@ -104,17 +104,21 @@ func run() error {
 
 	if cfg.Role == "all" || cfg.Role == "dashboard" {
 		q := db.New(pool)
+		authz := middleware.NewAuth(q, cfg.AdminPassword)
 		// The recover endpoint re-enqueues delivery jobs, so the dashboard role
 		// needs its own insert-only River client.
 		insertClient, err := queue.NewInsertOnlyClient(pool)
 		if err != nil {
 			return err
 		}
-		api.RegisterDestinations(mux, q, cfg.AdminPassword)
-		api.RegisterRoutes(mux, q, cfg.AdminPassword)
-		api.RegisterDeliveries(mux, pool, q, insertClient, cfg.AdminPassword)
-		api.RegisterEvents(mux, q, cfg.AdminPassword)
-		api.RegisterReplay(mux, pool, q, insertClient, cfg.AdminPassword)
+		api.RegisterDestinations(mux, q, authz)
+		api.RegisterRoutes(mux, q, authz)
+		api.RegisterDeliveries(mux, pool, q, insertClient, authz)
+		api.RegisterEvents(mux, q, authz)
+		api.RegisterReplay(mux, pool, q, insertClient, authz)
+		// Key management deliberately stays on the admin password alone —
+		// an API key must never be able to mint or revoke keys.
+		api.RegisterAPIKeys(mux, q, cfg.AdminPassword)
 		slog.Info("destinations, routes, deliveries, events, and replay API mounted")
 	}
 

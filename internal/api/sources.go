@@ -11,21 +11,21 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"webhook-gateway/internal/auth"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/sourcedef"
 	"webhook-gateway/internal/tenancy"
+	"webhook-gateway/internal/api/middleware"
+
 )
 
-// RegisterSources mounts the minimal sources API on mux, guarded by the admin
-// password. Phase 1 only needs create and list — full CRUD comes later. The
-// catalog is passed in (loaded once at boot, shared with ingest) so create can
-// reject a provider_type that has no verifier.
-func RegisterSources(mux *http.ServeMux, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, adminPassword string) {
+
+// RegisterSources mounts the minimal sources API on mux. Reads need the
+// `read` scope, mutations `write`; the admin password passes both.
+func RegisterSources(mux *http.ServeMux, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, authz *middleware.Auth) {
 	h := &sourcesHandler{q: q, enc: enc, catalog: catalog}
-	mux.Handle("POST /api/sources", auth.AdminOnly(adminPassword, http.HandlerFunc(h.create)))
-	mux.Handle("GET /api/sources", auth.AdminOnly(adminPassword, http.HandlerFunc(h.list)))
+	mux.Handle("POST /api/sources", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.create)))
+	mux.Handle("GET /api/sources", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
 }
 
 type sourcesHandler struct {

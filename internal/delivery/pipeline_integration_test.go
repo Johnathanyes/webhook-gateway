@@ -32,6 +32,7 @@ import (
 
 	"webhook-gateway/internal/alerting"
 	"webhook-gateway/internal/api"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/ingest"
@@ -78,8 +79,9 @@ func newHarness(t *testing.T) *harness {
 	mux := http.NewServeMux()
 	ingest.Register(mux, pool, q, insertClient, enc, catalog,
 		ingest.Options{MaxBodyBytes: 1 << 20, RateLimitPerSecond: 1000})
-	api.RegisterDeliveries(mux, pool, q, insertClient, testAdminPassword)
-	api.RegisterReplay(mux, pool, q, insertClient, testAdminPassword)
+	authz := middleware.NewAuth(q, testAdminPassword)
+	api.RegisterDeliveries(mux, pool, q, insertClient, authz)
+	api.RegisterReplay(mux, pool, q, insertClient, authz)
 
 	return &harness{pool: pool, q: q, mux: mux, insertClient: insertClient}
 }

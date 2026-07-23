@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 
-	"webhook-gateway/internal/auth"
+	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/queue"
 )
@@ -20,9 +20,9 @@ import (
 const deliveryStatusDeadLettered = "dead_lettered"
 
 // RegisterDeliveries mounts the delivery recovery API, Insert only River client
-func RegisterDeliveries(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], adminPassword string) {
+func RegisterDeliveries(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], authz *middleware.Auth) {
 	h := &deliveriesHandler{pool: pool, q: q, river: riverClient}
-	mux.Handle("POST /api/deliveries/{id}/recover", auth.AdminOnly(adminPassword, http.HandlerFunc(h.recover)))
+		mux.Handle("POST /api/deliveries/{id}/recover", authz.RequireScope(middleware.ScopeReplay, http.HandlerFunc(h.recover)))
 }
 
 type deliveriesHandler struct {

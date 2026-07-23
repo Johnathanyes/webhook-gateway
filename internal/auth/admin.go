@@ -1,4 +1,4 @@
-// Package auth guards admin endpoints. OSS v1 is single-user (BR-27): a single
+// Package auth guards admin endpoints. OSS v1 is single-user: a single
 // shared admin password, checked in constant time.
 package auth
 
