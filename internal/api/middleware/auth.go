@@ -6,6 +6,7 @@ package middleware
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -77,11 +78,11 @@ func (a *Auth) RequireScope(scope string, h http.Handler) http.Handler {
 				return
 			}
 			slog.Error("looking up API key", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
+			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
 		if !slices.Contains(key.Scopes, scope) {
-			http.Error(w, "missing scope: "+scope, http.StatusForbidden)
+			writeError(w, http.StatusForbidden, "missing scope: "+scope)
 			return
 		}
 
@@ -101,5 +102,15 @@ func (a *Auth) RequireScope(scope string, h http.Handler) http.Handler {
 
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	writeError(w, http.StatusUnauthorized, "unauthorized")
+}
+
+// writeError emits the same {"error": message} envelope the api package's
+// respond.go uses. It is duplicated here rather than imported because
+// middleware sits below api in the import graph — api imports middleware, not
+// the other way around.
+func writeError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

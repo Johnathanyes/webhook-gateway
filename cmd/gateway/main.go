@@ -113,13 +113,14 @@ func run() error {
 		}
 		api.RegisterDestinations(mux, q, authz)
 		api.RegisterRoutes(mux, q, authz)
+		api.RegisterRules(mux, q, authz)
 		api.RegisterDeliveries(mux, pool, q, insertClient, authz)
 		api.RegisterEvents(mux, q, authz)
 		api.RegisterReplay(mux, pool, q, insertClient, authz)
 		// Key management deliberately stays on the admin password alone —
 		// an API key must never be able to mint or revoke keys.
 		api.RegisterAPIKeys(mux, q, cfg.AdminPassword)
-		slog.Info("destinations, routes, deliveries, events, and replay API mounted")
+		slog.Info("destinations, routes, rules, deliveries, events, replay, and api-keys API mounted")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {

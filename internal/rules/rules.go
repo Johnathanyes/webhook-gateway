@@ -53,6 +53,20 @@ var env = sync.OnceValues(func() (*cel.Env, error) {
 	)
 })
 
+// Validate reports whether expression compiles against the rule environment,
+// so the CRUD API can reject a typo at write time (400) instead of letting it
+// fail open silently at ingest. Returns nil for a valid expression.
+func Validate(expression string) error {
+	celEnv, err := env()
+	if err != nil {
+		return err
+	}
+	if _, iss := celEnv.Compile(expression); iss != nil && iss.Err() != nil {
+		return iss.Err()
+	}
+	return nil
+}
+
 // Evaluate runs rs (already filtered to enabled and sorted by priority — see
 // ListEnabledRulesForSource) against in. First match wins. Expressions are
 // compiled on every call; at self-hosted rule counts that costs microseconds,

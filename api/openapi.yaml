@@ -1,0 +1,786 @@
+openapi: 3.1.0
+info:
+  title: Webhook Gateway API
+  version: "1.0.0"
+  description: |
+    The webhook gateway's HTTP API — the full surface behind the CLI and the
+    dashboard SPA (BR-24: "everything the UI does"). This spec is handwritten
+    and is the source of truth for the Phase 7 docs-site API reference.
+
+    ## Authentication
+
+    Every `/api/*` endpoint takes a bearer token in `Authorization: Bearer <token>`.
+    Two credential types are accepted:
+
+    - **Admin password** — the `ADMIN_PASSWORD` the gateway boots with. Passes
+      every scope check; the only credential that may manage API keys.
+    - **API key** (`whg_...`) — scoped. Each key carries a subset of
+      `read`, `write`, `replay`, `tunnel`. A request whose endpoint needs a
+      scope the key lacks gets `403`; an unknown or revoked key gets `401`.
+
+    The `/ingest/{path}` endpoint is unauthenticated by bearer token — it is
+    authenticated by the source path plus the provider signature.
+
+    ## Errors
+
+    All error responses share one envelope: `{"error": "<message>"}`, including
+    those emitted by the auth middleware.
+servers:
+  - url: http://localhost:8080
+    description: Local / self-hosted gateway
+
+tags:
+  - name: sources
+  - name: destinations
+  - name: routes
+  - name: rules
+  - name: events
+  - name: deliveries
+  - name: replays
+  - name: api-keys
+  - name: ingest
+  - name: system
+
+paths:
+  /ingest/{path}:
+    post:
+      tags: [ingest]
+      summary: Receive a webhook
+      description: |
+        The provider-facing endpoint. `path` is the source's unguessable
+        `endpoint_path`. The body is stored verbatim, signature-verified per the
+        source's provider, and (unless a rule drops it) fanned out to deliveries.
+        Always returns 200 once the event is durably stored, even if the
+        signature failed — verification outcome is recorded, not enforced here.
+      security: []
+      parameters:
+        - { name: path, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          "*/*":
+            schema: { type: string, format: binary }
+      responses:
+        "200":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+
+  /api/sources:
+    get:
+      tags: [sources]
+      summary: List sources
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Source" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [sources]
+      summary: Create a source
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, provider_type]
+              properties:
+                name: { type: string }
+                provider_type:
+                  type: string
+                  description: A catalog slug (e.g. stripe, github, generic_hmac) or "none".
+                signing_secret:
+                  type: string
+                  description: Required unless provider_type is "none". Stored encrypted; never returned.
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Source" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/destinations:
+    get:
+      tags: [destinations]
+      summary: List destinations
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Destination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [destinations]
+      summary: Create a destination
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DestinationInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Destination" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/destinations/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [destinations]
+      summary: Get a destination
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Destination" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [destinations]
+      summary: Update a destination
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DestinationInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Destination" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [destinations]
+      summary: Delete a destination
+      security: [{ bearerAuth: [write] }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/destinations/{id}/pause:
+    post:
+      tags: [destinations]
+      summary: Pause delivery to a destination
+      security: [{ bearerAuth: [write] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Destination" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/destinations/{id}/resume:
+    post:
+      tags: [destinations]
+      summary: Resume delivery to a destination
+      security: [{ bearerAuth: [write] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Destination" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/routes:
+    get:
+      tags: [routes]
+      summary: List routes
+      security: [{ bearerAuth: [read] }]
+      parameters:
+        - { name: source_id, in: query, schema: { type: string, format: uuid } }
+        - { name: destination_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Route" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [routes]
+      summary: Create a route (bind a source to a destination)
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_id, destination_id]
+              properties:
+                source_id: { type: string, format: uuid }
+                destination_id: { type: string, format: uuid }
+                enabled: { type: boolean, default: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/routes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    patch:
+      tags: [routes]
+      summary: Enable or disable a route
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Route" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [routes]
+      summary: Delete a route
+      security: [{ bearerAuth: [write] }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/rules:
+    get:
+      tags: [rules]
+      summary: List rules
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Rule" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [rules]
+      summary: Create a rule
+      description: The CEL expression is compile-checked; a syntactically invalid expression is a 400.
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/rules/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [rules]
+      summary: Get a rule
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [rules]
+      summary: Update a rule
+      security: [{ bearerAuth: [write] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleInput" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rule" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [rules]
+      summary: Delete a rule
+      security: [{ bearerAuth: [write] }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/events:
+    get:
+      tags: [events]
+      summary: List and search events
+      description: Cursor-paginated. Pass the returned `next_cursor` back as `cursor` for the next page.
+      security: [{ bearerAuth: [read] }]
+      parameters:
+        - { name: source_id, in: query, schema: { type: string, format: uuid } }
+        - { name: verified, in: query, schema: { type: boolean } }
+        - { name: after, in: query, schema: { type: string, format: date-time } }
+        - { name: before, in: query, schema: { type: string, format: date-time } }
+        - { name: search, in: query, schema: { type: string }, description: Full-text over payload + headers. }
+        - { name: delivery_status, in: query, schema: { type: string } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/EventSummary" }
+                  next_cursor: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/events/{id}:
+    get:
+      tags: [events]
+      summary: Get a full event (raw headers + body)
+      security: [{ bearerAuth: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/events/{id}/trace:
+    get:
+      tags: [events]
+      summary: Per-event delivery trace (BR-17)
+      description: received → verified → queued → per-delivery attempt timeline → outcome.
+      security: [{ bearerAuth: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventTrace" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/events/{id}/replay:
+    post:
+      tags: [replays]
+      summary: Replay a single event
+      description: Creates fresh deliveries through the normal enqueue path. Bypasses rules — replay is an explicit operator override.
+      security: [{ bearerAuth: [replay] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  event_id: { type: string, format: uuid }
+                  deliveries_created: { type: integer }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/replays:
+    post:
+      tags: [replays]
+      summary: Bulk replay by filter
+      description: Recorded in the replays table and executed as a background job so a large replay does not block the API.
+      security: [{ bearerAuth: [replay] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplayFilter" }
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Replay" }
+        "400": { $ref: "#/components/responses/Error" }
+
+  /api/replays/{id}:
+    get:
+      tags: [replays]
+      summary: Get bulk-replay status
+      security: [{ bearerAuth: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Replay" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/deliveries/{id}/recover:
+    post:
+      tags: [deliveries]
+      summary: Recover a dead-lettered delivery
+      description: Re-enqueues a delivery that exhausted its retries (BR-09).
+      security: [{ bearerAuth: [replay] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Re-enqueued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery_id: { type: string, format: uuid }
+                  status: { type: string }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/api-keys:
+    get:
+      tags: [api-keys]
+      summary: List API keys
+      description: Admin-password only. Never returns key plaintext or hash; revoked keys remain listed as an audit trail.
+      security: [{ adminAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ApiKey" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [api-keys]
+      summary: Create an API key
+      description: Admin-password only. The plaintext key is returned exactly once, here.
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name: { type: string }
+                scopes:
+                  type: array
+                  items: { type: string, enum: [read, write, replay, tunnel] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ApiKey"
+                  - type: object
+                    properties:
+                      key: { type: string, description: Plaintext key, shown once. }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/api-keys/{id}:
+    delete:
+      tags: [api-keys]
+      summary: Revoke an API key
+      description: Admin-password only. Soft-delete; the row is kept with revoked_at set.
+      security: [{ adminAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Revoked }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness
+      security: []
+      responses:
+        "200": { description: Process is up }
+
+  /readyz:
+    get:
+      tags: [system]
+      summary: Readiness (DB reachable)
+      security: []
+      responses:
+        "200": { description: Ready }
+        "503": { description: Database unreachable }
+
+  /metrics:
+    get:
+      tags: [system]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        "200":
+          description: Prometheus exposition format
+          content:
+            text/plain: {}
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: An API key (whg_...) or the admin password. Scopes listed per-operation apply to API keys.
+    adminAuth:
+      type: http
+      scheme: bearer
+      description: The admin password only. API keys are rejected on these endpoints.
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Error:
+      description: Request error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: Missing, unknown, or revoked credential
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: Valid API key lacking the required scope
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      properties:
+        error: { type: string }
+      required: [error]
+
+    Source:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        provider_type: { type: string }
+        endpoint_path: { type: string, description: The path segment providers POST webhooks to. }
+        created_at: { type: string, format: date-time }
+
+    DestinationInput:
+      type: object
+      required: [name, url, timeout_ms, max_attempts, backoff_base_seconds, backoff_max_seconds]
+      properties:
+        name: { type: string }
+        url: { type: string, format: uri }
+        auth_config: { type: object, description: Opaque auth config (e.g. HMAC signing) applied to outbound requests. }
+        timeout_ms: { type: integer }
+        rate_limit_per_second: { type: [integer, "null"], description: null = unlimited. }
+        max_attempts: { type: integer }
+        backoff_base_seconds: { type: integer }
+        backoff_max_seconds: { type: integer }
+
+    Destination:
+      allOf:
+        - $ref: "#/components/schemas/DestinationInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            paused: { type: boolean }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    Route:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        destination_id: { type: string, format: uuid }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    RuleInput:
+      type: object
+      required: [source_id, name, expression, action]
+      properties:
+        source_id: { type: string, format: uuid }
+        name: { type: string }
+        expression: { type: string, description: "CEL over body, headers, source. E.g. body.amount > 10000" }
+        action: { type: string, enum: [drop, route] }
+        route_destination_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Required when action=route; ignored when action=drop.
+        priority: { type: integer, default: 100, description: Lower runs first; first match wins. }
+        enabled: { type: boolean, default: true }
+
+    Rule:
+      allOf:
+        - $ref: "#/components/schemas/RuleInput"
+        - type: object
+          properties:
+            id: { type: string, format: uuid }
+            created_at: { type: string, format: date-time }
+            updated_at: { type: string, format: date-time }
+
+    EventSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        content_type: { type: string }
+        dedupe_key: { type: string }
+        verified: { type: boolean }
+        received_at: { type: string, format: date-time }
+
+    Event:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        source_id: { type: string, format: uuid }
+        raw_headers: { type: object }
+        raw_body: { type: string, format: byte }
+        content_type: { type: string }
+        parsed_body: { type: object }
+        dedupe_key: { type: string }
+        verified: { type: boolean }
+        received_at: { type: string, format: date-time }
+
+    EventTrace:
+      type: object
+      properties:
+        event_id: { type: string, format: uuid }
+        received_at: { type: string, format: date-time }
+        verified: { type: boolean }
+        deliveries:
+          type: array
+          items:
+            type: object
+            properties:
+              delivery_id: { type: string, format: uuid }
+              destination_id: { type: string, format: uuid }
+              status: { type: string }
+              attempt_count: { type: integer }
+              queued_at: { type: string, format: date-time }
+              dead_lettered_at: { type: [string, "null"], format: date-time }
+              attempts:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    attempt_number: { type: integer }
+                    request_headers: { type: object }
+                    response_status_code: { type: [integer, "null"] }
+                    response_headers: { type: object }
+                    response_body_truncated: { type: string }
+                    error: { type: string }
+                    duration_ms: { type: [integer, "null"] }
+                    attempted_at: { type: string, format: date-time }
+
+    ReplayFilter:
+      type: object
+      description: Same filter surface as GET /api/events. All fields optional.
+      properties:
+        source_id: { type: string, format: uuid }
+        verified: { type: boolean }
+        after: { type: string, format: date-time }
+        before: { type: string, format: date-time }
+        search: { type: string }
+        delivery_status: { type: string }
+
+    Replay:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string }
+        filter: { $ref: "#/components/schemas/ReplayFilter" }
+        matched_count: { type: [integer, "null"] }
+        requeued_count: { type: [integer, "null"] }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+
+    ApiKey:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        key_prefix: { type: string, description: First 12 chars, for display. }
+        scopes:
+          type: array
+          items: { type: string, enum: [read, write, replay, tunnel] }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, "null"], format: date-time }
+        revoked_at: { type: [string, "null"], format: date-time }
