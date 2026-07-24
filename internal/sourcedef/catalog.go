@@ -2,6 +2,7 @@ package sourcedef
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 
@@ -51,6 +52,12 @@ func (d Definition) validate() error {
 	}
 	if d.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	if d.SamplePayload == "" {
+		return fmt.Errorf("sample_payload is required")
+	}
+	if !json.Valid([]byte(d.SamplePayload)) {
+		return fmt.Errorf("sample_payload is not valid JSON")
 	}
 	switch d.Verification.Type {
 	case "none":

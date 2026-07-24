@@ -94,11 +94,11 @@ func run() error {
 			return err
 		}
 
-		api.RegisterSources(mux, q, enc, catalog, authz)
-		ingest.Register(mux, pool, q, insertClient, enc, catalog, ingest.Options{
+		ingestHandler := ingest.Register(mux, pool, q, insertClient, enc, catalog, ingest.Options{
 			MaxBodyBytes:       cfg.IngestMaxBodyBytes,
 			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
 		})
+		api.RegisterSources(mux, q, enc, catalog, authz, ingestHandler)
 		slog.Info("ingest and sources API mounted")
 	}
 

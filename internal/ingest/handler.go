@@ -1,8 +1,10 @@
 package ingest
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -37,7 +39,9 @@ type Handler struct {
 
 // Register mounts the ingest endpoint on mux. The catalog is loaded once at
 // boot and shared with the sources API so both sides agree on provider slugs.
-func Register(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, opts Options) {
+// It returns the Handler so callers outside this package (the test-event
+// generator, #25) can drive the same transactional core through ProcessEvent.
+func Register(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient *river.Client[pgx.Tx], enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, opts Options) *Handler {
 	h := &Handler{
 		pool:         pool,
 		q:            q,
@@ -48,6 +52,7 @@ func Register(mux *http.ServeMux, pool *pgxpool.Pool, q *db.Queries, riverClient
 		limiter:      newRateLimiter(opts.RateLimitPerSecond),
 	}
 	mux.Handle("POST /ingest/{path}", http.HandlerFunc(h.ingest))
+	return h
 }
 
 func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
@@ -84,18 +89,33 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, verified, err := h.ProcessEvent(ctx, source, body, r.Header)
+	if err != nil {
+		slog.Error("processing event", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	observability.RecordEventIngested(verified)
+
+	// Ack only after the commit: the event is durable before the provider hears 200.
+	writeJSON(w, http.StatusOK, map[string]bool{"received": true})
+}
+
+// ProcessEvent verifies, stores, rule-evaluates, and fans out one webhook —
+// the transactional core shared by the real ingest endpoint above and the
+// test-event generator (#25), so a generated test event exercises real
+// verification and rule evaluation rather than bypassing them.
+func (h *Handler) ProcessEvent(ctx context.Context, source db.Source, body []byte, headers http.Header) (db.InsertEventRow, bool, error) {
 	// A failed or errored check does not fail the request: the event is stored
 	// either way, with verified reflecting the outcome, so a misconfigured
 	// secret surfaces in the event log instead of vanishing (per Phase 1 decision).
-	verified := h.verify(source, body, r.Header)
+	verified := h.verify(source, body, headers)
 
 	// raw_headers is stored as JSONB verbatim; http.Header marshals as
 	// map[string][]string, so multi-valued headers survive round-trip.
-	rawHeaders, err := json.Marshal(r.Header)
+	rawHeaders, err := json.Marshal(headers)
 	if err != nil {
-		slog.Error("marshaling headers", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return db.InsertEventRow{}, false, fmt.Errorf("marshaling headers: %w", err)
 	}
 
 	// Best-effort JSON parse: store the body as parsed_body only when it is
@@ -105,13 +125,11 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		parsedBody = body
 	}
 
-	contentType := r.Header.Get("Content-Type")
+	contentType := headers.Get("Content-Type")
 
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
-		slog.Error("beginning transaction", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return db.InsertEventRow{}, false, fmt.Errorf("beginning transaction: %w", err)
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
@@ -129,9 +147,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		Verified:    verified,
 	})
 	if err != nil {
-		slog.Error("inserting event", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return db.InsertEventRow{}, false, fmt.Errorf("inserting event: %w", err)
 	}
 
 	// Rules (BR-14): the first matching enabled rule may drop the event or
@@ -140,9 +156,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 	// bypass this — replaying a dropped event is an explicit operator override.
 	ruleRows, err := qtx.ListEnabledRulesForSource(ctx, source.ID)
 	if err != nil {
-		slog.Error("loading rules", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return db.InsertEventRow{}, false, fmt.Errorf("loading rules: %w", err)
 	}
 	decision := rules.Evaluate(ruleRows, ruleInput(parsedBody, rawHeaders, source))
 
@@ -153,9 +167,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 			ID:            event.ID,
 			DroppedReason: pgtype.Text{String: decision.RuleName, Valid: true},
 		}); err != nil {
-			slog.Error("marking event dropped", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+			return db.InsertEventRow{}, false, fmt.Errorf("marking event dropped: %w", err)
 		}
 	case rules.ActionRoute:
 		rows, err := qtx.ListDeliveryTargetsByDestinationIDs(ctx, db.ListDeliveryTargetsByDestinationIDsParams{
@@ -163,9 +175,7 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 			TenantID:       source.TenantID,
 		})
 		if err != nil {
-			slog.Error("loading rule route destinations", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+			return db.InsertEventRow{}, false, fmt.Errorf("loading rule route destinations: %w", err)
 		}
 		targets := make([]queue.DeliveryTarget, len(rows))
 		for i, row := range rows {
@@ -177,28 +187,20 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if _, err := queue.EnqueueDeliveriesTo(ctx, h.river, tx, qtx, source.TenantID, event.ID, targets); err != nil {
-			slog.Error("enqueuing rule-routed deliveries", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+			return db.InsertEventRow{}, false, fmt.Errorf("enqueuing rule-routed deliveries: %w", err)
 		}
 	default:
 		// Fan out to every destination this source is routed to
 		if _, err := queue.EnqueueDeliveries(ctx, h.river, tx, qtx, source.TenantID, source.ID, event.ID); err != nil {
-			slog.Error("enqueuing deliveries", "error", err)
-			writeError(w, http.StatusInternalServerError, "internal error")
-			return
+			return db.InsertEventRow{}, false, fmt.Errorf("enqueuing deliveries: %w", err)
 		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		slog.Error("committing event", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal error")
-		return
+		return db.InsertEventRow{}, false, fmt.Errorf("committing event: %w", err)
 	}
-	observability.RecordEventIngested(verified)
 
-	// Ack only after the commit: the event is durable before the provider hears 200.
-	writeJSON(w, http.StatusOK, map[string]bool{"received": true})
+	return event, verified, nil
 }
 
 // ruleInput shapes the stored event fields for rule evaluation. Unmarshal

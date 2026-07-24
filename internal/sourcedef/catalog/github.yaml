@@ -14,3 +14,21 @@ verification:
   encoding: hex
   signature_header: X-Hub-Signature-256
   signature_prefix: "sha256="
+
+sample_headers:
+  Content-Type: application/json
+  X-GitHub-Event: ping
+sample_payload: |
+  {
+    "zen": "Design for failure.",
+    "hook_id": 12345678,
+    "repository": {
+      "id": 1296269,
+      "full_name": "octocat/Hello-World",
+      "private": false
+    },
+    "sender": {
+      "login": "octocat",
+      "id": 1
+    }
+  }

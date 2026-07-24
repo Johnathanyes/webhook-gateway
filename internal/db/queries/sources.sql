@@ -4,6 +4,12 @@
 SELECT * FROM sources
 WHERE endpoint_path = $1;
 
+-- name: GetSource :one
+-- The test-event generator (#25) and other admin lookups fetch a source by
+-- id, scoped to the tenant like every other admin-authed query.
+SELECT * FROM sources
+WHERE id = $1 AND tenant_id = $2;
+
 -- name: ListSources :many
 SELECT * FROM sources
 WHERE tenant_id = $1

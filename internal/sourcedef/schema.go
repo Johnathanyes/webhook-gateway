@@ -12,6 +12,17 @@ type Definition struct {
 	Description string `yaml:"description"`
 
 	Verification Verification `yaml:"verification"`
+
+	// SamplePayload is a realistic example webhook body for this provider,
+	// stored as raw JSON text so it signs and sends byte-for-byte identical
+	// to what's on the page — no reserialization to drift from what Verify
+	// hashes. Used by the test-event generator to exercise the real
+	// ingest + verification path without needing real provider traffic.
+	SamplePayload string `yaml:"sample_payload"`
+
+	// SampleHeaders are extra headers sent alongside the signed signature
+	// header when generating a test event, e.g. Content-Type. Optional.
+	SampleHeaders map[string]string `yaml:"sample_headers"`
 }
 
 // Verification describes the signature scheme for a provider. It covers the

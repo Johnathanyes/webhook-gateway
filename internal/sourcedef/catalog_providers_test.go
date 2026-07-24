@@ -87,3 +87,39 @@ func TestStripeCatalogEntry(t *testing.T) {
 		t.Error("wrong secret accepted")
 	}
 }
+
+// TestSampleEventSignVerifyRoundTrip covers #25's core guarantee: every
+// catalog provider has a sample_payload, and Sign-ing it with a secret
+// produces headers that Verify accepts — the same pairing the test-event
+// generator relies on to exercise real verification.
+func TestSampleEventSignVerifyRoundTrip(t *testing.T) {
+	defs, err := sourcedef.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	secret := []byte("test-event-secret")
+	for slug, def := range defs {
+		t.Run(slug, func(t *testing.T) {
+			if def.SamplePayload == "" {
+				t.Fatalf("catalog entry %q has no sample_payload", slug)
+			}
+			body := []byte(def.SamplePayload)
+
+			headers, err := sourcedef.Sign(def, body, secret)
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			ok, err := sourcedef.Verify(def, body, headers, secret)
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if !ok {
+				t.Error("signed sample payload rejected by Verify")
+			}
+
+			if ok, _ := sourcedef.Verify(def, body, headers, []byte("wrong-secret")); ok {
+				t.Error("wrong secret accepted")
+			}
+		})
+	}
+}

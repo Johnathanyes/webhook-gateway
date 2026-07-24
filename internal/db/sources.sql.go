@@ -11,6 +11,41 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const getSource = `-- name: GetSource :one
+SELECT id, tenant_id, name, provider_type, endpoint_path, signing_secret_encrypted, signing_secret_key_version, verification_config, dedupe_enabled, dedupe_strategy, dedupe_field_path, dedupe_window_seconds, paused_at, created_at, updated_at FROM sources
+WHERE id = $1 AND tenant_id = $2
+`
+
+type GetSourceParams struct {
+	ID       pgtype.UUID `json:"id"`
+	TenantID pgtype.UUID `json:"tenant_id"`
+}
+
+// The test-event generator (#25) and other admin lookups fetch a source by
+// id, scoped to the tenant like every other admin-authed query.
+func (q *Queries) GetSource(ctx context.Context, arg GetSourceParams) (Source, error) {
+	row := q.db.QueryRow(ctx, getSource, arg.ID, arg.TenantID)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Name,
+		&i.ProviderType,
+		&i.EndpointPath,
+		&i.SigningSecretEncrypted,
+		&i.SigningSecretKeyVersion,
+		&i.VerificationConfig,
+		&i.DedupeEnabled,
+		&i.DedupeStrategy,
+		&i.DedupeFieldPath,
+		&i.DedupeWindowSeconds,
+		&i.PausedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getSourceByEndpointPath = `-- name: GetSourceByEndpointPath :one
 SELECT id, tenant_id, name, provider_type, endpoint_path, signing_secret_encrypted, signing_secret_key_version, verification_config, dedupe_enabled, dedupe_strategy, dedupe_field_path, dedupe_window_seconds, paused_at, created_at, updated_at FROM sources
 WHERE endpoint_path = $1

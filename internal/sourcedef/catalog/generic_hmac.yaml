@@ -13,3 +13,14 @@ verification:
   algorithm: sha256
   signature_header: X-Signature
   encoding: hex
+
+sample_headers:
+  Content-Type: application/json
+sample_payload: |
+  {
+    "event": "test.event",
+    "id": "evt_test_generic",
+    "data": {
+      "message": "hello from webhook-gateway's test-event generator"
+    }
+  }

@@ -15,7 +15,10 @@ import (
 	"webhook-gateway/internal/api/middleware"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/ingest"
+	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
+	"webhook-gateway/internal/tenancy"
 )
 
 // testEncryptionKey is a fixed 32-byte AES-256 key, base64-encoded — test-only.
@@ -36,7 +39,7 @@ func TestSourcesAPIIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword))
+	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword), testIngestHandler(t, pool, q, enc, catalog))
 
 	const secret = "whsec_super_secret_value"
 
@@ -112,7 +115,121 @@ func TestSourcesAPIIntegration(t *testing.T) {
 	}
 }
 
+// TestSourceTestEventAPIIntegration covers #25's done-criteria: per catalog
+// provider, a generated test event is signed with the source's real secret,
+// verified through the real ingest path, and produces a delivery via the
+// normal route.
+func TestSourceTestEventAPIIntegration(t *testing.T) {
+	pool := testDB(t)
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+	q := db.New(pool)
+
+	const adminPassword = "test-admin-password"
+	mux := http.NewServeMux()
+	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword), testIngestHandler(t, pool, q, enc, catalog))
+
+	authed := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+adminPassword)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, provider := range []string{"stripe", "github", "generic_hmac"} {
+		t.Run(provider, func(t *testing.T) {
+			createBody := `{"name":"test-event-` + provider + `","provider_type":"` + provider + `","signing_secret":"test-secret-value"}`
+			rec := authed(http.MethodPost, "/api/sources", createBody)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create source status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+			}
+			var src sourceResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &src); err != nil {
+				t.Fatalf("decoding create response: %v", err)
+			}
+			srcID, err := parseUUID(src.ID)
+			if err != nil {
+				t.Fatalf("parsing source id: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM sources WHERE id = $1", srcID)
+			})
+
+			dest, err := q.InsertDestination(context.Background(), db.InsertDestinationParams{
+				TenantID:           tenancy.DefaultTenantID,
+				Name:               "test-event-dest-" + provider,
+				Url:                "http://localhost:0/nowhere",
+				AuthConfig:         []byte("{}"),
+				TimeoutMs:          5000,
+				MaxAttempts:        3,
+				BackoffBaseSeconds: 1,
+				BackoffMaxSeconds:  60,
+			})
+			if err != nil {
+				t.Fatalf("insert destination: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM destinations WHERE id = $1", dest.ID)
+			})
+
+			if _, err := q.InsertRoute(context.Background(), db.InsertRouteParams{
+				TenantID:      tenancy.DefaultTenantID,
+				SourceID:      srcID,
+				DestinationID: dest.ID,
+				Enabled:       true,
+			}); err != nil {
+				t.Fatalf("insert route: %v", err)
+			}
+
+			teRec := authed(http.MethodPost, "/api/sources/"+src.ID+"/test-event", "")
+			if teRec.Code != http.StatusOK {
+				t.Fatalf("test-event status = %d, want 200; body=%s", teRec.Code, teRec.Body.String())
+			}
+			var got testEventResponse
+			if err := json.Unmarshal(teRec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decoding test-event response: %v", err)
+			}
+			if !got.Verified {
+				t.Errorf("provider %q: test event did not verify", provider)
+			}
+			eventID, err := parseUUID(got.EventID)
+			if err != nil {
+				t.Fatalf("parsing event id: %v", err)
+			}
+			t.Cleanup(func() {
+				_, _ = pool.Exec(context.Background(), "DELETE FROM events WHERE id = $1", eventID)
+			})
+
+			var deliveryCount int
+			if err := pool.QueryRow(context.Background(),
+				"SELECT count(*) FROM deliveries WHERE event_id = $1", eventID,
+			).Scan(&deliveryCount); err != nil {
+				t.Fatalf("counting deliveries: %v", err)
+			}
+			if deliveryCount != 1 {
+				t.Errorf("provider %q: deliveries for test event = %d, want 1", provider, deliveryCount)
+			}
+		})
+	}
+}
+
 // --- helpers ---
+
+// testIngestHandler builds an ingest.Handler wired the same way main.go
+// wires it, without mounting the real /ingest/{path} route — the sources API
+// test-event endpoint (#25) only needs the handler's ProcessEvent method.
+func testIngestHandler(t *testing.T, pool *pgxpool.Pool, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition) *ingest.Handler {
+	t.Helper()
+	insertClient, err := queue.NewInsertOnlyClient(pool)
+	if err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+	return ingest.Register(http.NewServeMux(), pool, q, insertClient, enc, catalog, ingest.Options{
+		MaxBodyBytes:       1 << 20,
+		RateLimitPerSecond: 1000,
+	})
+}
 
 func testDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()

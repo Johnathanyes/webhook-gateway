@@ -18,3 +18,24 @@ verification:
     timestamp_field: t
     signature_field: v1
     tolerance_seconds: 300
+
+sample_headers:
+  Content-Type: application/json
+sample_payload: |
+  {
+    "id": "evt_test_webhook",
+    "object": "event",
+    "api_version": "2024-06-20",
+    "created": 1719000000,
+    "type": "payment_intent.succeeded",
+    "data": {
+      "object": {
+        "id": "pi_test_123",
+        "object": "payment_intent",
+        "amount": 2000,
+        "currency": "usd",
+        "status": "succeeded"
+      }
+    },
+    "livemode": false
+  }

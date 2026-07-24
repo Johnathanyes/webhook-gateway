@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"webhook-gateway/internal/crypto"
@@ -20,18 +23,25 @@ import (
 )
 
 
+// eventProcessor drives an event through real ingest path.
+type eventProcessor interface {
+	ProcessEvent(ctx context.Context, source db.Source, body []byte, headers http.Header) (db.InsertEventRow, bool, error)
+}
+
 // RegisterSources mounts the minimal sources API on mux. Reads need the
 // `read` scope, mutations `write`; the admin password passes both.
-func RegisterSources(mux *http.ServeMux, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, authz *middleware.Auth) {
-	h := &sourcesHandler{q: q, enc: enc, catalog: catalog}
+func RegisterSources(mux *http.ServeMux, q *db.Queries, enc *crypto.Encryptor, catalog map[string]sourcedef.Definition, authz *middleware.Auth, ingester eventProcessor) {
+	h := &sourcesHandler{q: q, enc: enc, catalog: catalog, ingester: ingester}
 	mux.Handle("POST /api/sources", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.create)))
 	mux.Handle("GET /api/sources", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
+	mux.Handle("POST /api/sources/{id}/test-event", authz.RequireScope(middleware.ScopeWrite, http.HandlerFunc(h.testEvent)))
 }
 
 type sourcesHandler struct {
-	q       *db.Queries
-	enc     *crypto.Encryptor
-	catalog map[string]sourcedef.Definition
+	q        *db.Queries
+	enc      *crypto.Encryptor
+	catalog  map[string]sourcedef.Definition
+	ingester eventProcessor
 }
 
 type createSourceRequest struct {
@@ -83,7 +93,7 @@ func (h *sourcesHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Encrypt the signing secret at rest (BR-26). An empty secret is allowed
+	// Encrypt the signing secret at rest. An empty secret is allowed
 	// (e.g. provider_type "none"): both secret columns stay NULL.
 	var encrypted []byte
 	var keyVersion pgtype.Int4
@@ -130,9 +140,71 @@ func (h *sourcesHandler) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// generateEndpointPath returns an unguessable path segment — "src_" followed
+// testEventResponse reports the outcome of a generated test 
+type testEventResponse struct {
+	EventID  string `json:"event_id"`
+	Verified bool   `json:"verified"`
+}
+
+// testEvent signs the provider's sample payload with the
+// source's real secret and runs it through the actual ingest path
+func (h *sourcesHandler) testEvent(w http.ResponseWriter, r *http.Request) {
+	id, err := parseUUID(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid source id")
+		return
+	}
+	source, err := h.q.GetSource(r.Context(), db.GetSourceParams{ID: id, TenantID: tenancy.DefaultTenantID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "source not found")
+		return
+	}
+	if err != nil {
+		slog.Error("getting source", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	def, ok := h.catalog[source.ProviderType]
+	if !ok || def.SamplePayload == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("provider_type %q has no test-event sample configured", source.ProviderType))
+		return
+	}
+
+	var secret []byte
+	if len(source.SigningSecretEncrypted) > 0 {
+		secret, err = h.enc.Decrypt(source.SigningSecretEncrypted)
+		if err != nil {
+			slog.Error("decrypting signing secret", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
+
+	body := []byte(def.SamplePayload)
+	headers, err := sourcedef.Sign(def, body, secret)
+	if err != nil {
+		slog.Error("signing test event", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	event, verified, err := h.ingester.ProcessEvent(r.Context(), source, body, headers)
+	if err != nil {
+		slog.Error("processing test event", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, testEventResponse{
+		EventID:  uuidString(event.ID),
+		Verified: verified,
+	})
+}
+
+// generateEndpointPath returns a path segment — "src_" followed
 // by 32 hex chars from 16 crypto/rand bytes — that the provider posts webhooks
-// to (BR-01).
+// to
 func generateEndpointPath() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {

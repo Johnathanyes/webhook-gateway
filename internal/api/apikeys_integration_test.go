@@ -21,11 +21,14 @@ func TestAPIKeysIntegration(t *testing.T) {
 	pool := testDB(t)
 	q := db.New(pool)
 
+	enc := testEncryptor(t)
+	catalog := testCatalog(t)
+
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
 	RegisterAPIKeys(mux, q, adminPassword)
 	// A real scoped surface to exercise the middleware against.
-	RegisterSources(mux, q, testEncryptor(t), testCatalog(t), middleware.NewAuth(q, adminPassword))
+	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword), testIngestHandler(t, pool, q, enc, catalog))
 
 	do := func(method, path, token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))

@@ -116,6 +116,29 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/sources/{id}/test-event:
+    post:
+      tags: [sources]
+      summary: Generate a signed test event
+      description: |
+        Signs the provider's catalog sample_payload with the source's real
+        (decrypted) secret and runs it through the actual ingest path — a
+        test event exercises verification and rule evaluation rather than
+        bypassing them (BR-22).
+      security: [{ bearerAuth: [write] }]
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TestEventResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /api/destinations:
     get:
       tags: [destinations]
@@ -639,6 +662,13 @@ components:
         provider_type: { type: string }
         endpoint_path: { type: string, description: The path segment providers POST webhooks to. }
         created_at: { type: string, format: date-time }
+
+    TestEventResult:
+      type: object
+      properties:
+        event_id: { type: string, format: uuid }
+        verified: { type: boolean }
+      required: [event_id, verified]
 
     DestinationInput:
       type: object
