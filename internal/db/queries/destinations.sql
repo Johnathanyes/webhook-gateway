@@ -53,3 +53,14 @@ UPDATE destinations
 SET paused_at = NULL
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
+
+-- name: ListDeliveryTargetsByDestinationIDs :many
+-- The rule action='route' fan-out override: same row shape as
+-- ListEnabledDeliveryTargetsForSource but selected by explicit destination
+-- ids instead of the routes join. Unknown ids are silently absent.
+SELECT d.id AS destination_id,
+       d.max_attempts,
+       d.backoff_base_seconds,
+       d.backoff_max_seconds
+FROM destinations d
+WHERE d.id = ANY(@destination_ids::uuid[]) AND d.tenant_id = @tenant_id;

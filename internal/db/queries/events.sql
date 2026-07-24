@@ -76,3 +76,6 @@ INSERT INTO events (
     $1, $2, $3, $4, $5, $6, $7, $8
 )
 RETURNING id, received_at;
+
+-- name: MarkEventDropped :exec
+UPDATE events SET dropped_reason = $2 WHERE id = $1;

@@ -53,13 +53,38 @@ func InsertDeliveryJob(ctx context.Context, client *river.Client[pgx.Tx], tx pgx
 	return res.Job.ID, nil
 }
 
+// DeliveryTarget is the per-destination info needed to enqueue one delivery —
+// the common shape behind the default route fan-out and the rule
+// action='route' override.
+type DeliveryTarget struct {
+	DestinationID      pgtype.UUID
+	MaxAttempts        int32
+	BackoffBaseSeconds int32
+	BackoffMaxSeconds  int32
+}
+
 // EnqueueDeliveries fans an event out to every enabled route target for its
 // source
 func EnqueueDeliveries(ctx context.Context, client *river.Client[pgx.Tx], tx pgx.Tx, q *db.Queries, tenantID, sourceID, eventID pgtype.UUID) (int, error) {
-	targets, err := q.ListEnabledDeliveryTargetsForSource(ctx, sourceID)
+	rows, err := q.ListEnabledDeliveryTargetsForSource(ctx, sourceID)
 	if err != nil {
 		return 0, err
 	}
+	targets := make([]DeliveryTarget, len(rows))
+	for i, r := range rows {
+		targets[i] = DeliveryTarget{
+			DestinationID:      r.DestinationID,
+			MaxAttempts:        r.MaxAttempts,
+			BackoffBaseSeconds: r.BackoffBaseSeconds,
+			BackoffMaxSeconds:  r.BackoffMaxSeconds,
+		}
+	}
+	return EnqueueDeliveriesTo(ctx, client, tx, q, tenantID, eventID, targets)
+}
+
+// EnqueueDeliveriesTo enqueues one delivery per explicit target, bypassing the
+// routes join — the fan-out set a rule action='route' decided on.
+func EnqueueDeliveriesTo(ctx context.Context, client *river.Client[pgx.Tx], tx pgx.Tx, q *db.Queries, tenantID, eventID pgtype.UUID, targets []DeliveryTarget) (int, error) {
 	for _, target := range targets {
 		deliveryID, err := q.InsertDelivery(ctx, db.InsertDeliveryParams{
 			TenantID:      tenantID,

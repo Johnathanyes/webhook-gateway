@@ -353,3 +353,17 @@ func (q *Queries) ListEventsForReplay(ctx context.Context, arg ListEventsForRepl
 	}
 	return items, nil
 }
+
+const markEventDropped = `-- name: MarkEventDropped :exec
+UPDATE events SET dropped_reason = $2 WHERE id = $1
+`
+
+type MarkEventDroppedParams struct {
+	ID            pgtype.UUID `json:"id"`
+	DroppedReason pgtype.Text `json:"dropped_reason"`
+}
+
+func (q *Queries) MarkEventDropped(ctx context.Context, arg MarkEventDroppedParams) error {
+	_, err := q.db.Exec(ctx, markEventDropped, arg.ID, arg.DroppedReason)
+	return err
+}

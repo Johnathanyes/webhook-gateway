@@ -79,17 +79,18 @@ type Destination struct {
 }
 
 type Event struct {
-	ID           pgtype.UUID        `json:"id"`
-	TenantID     pgtype.UUID        `json:"tenant_id"`
-	SourceID     pgtype.UUID        `json:"source_id"`
-	RawHeaders   []byte             `json:"raw_headers"`
-	RawBody      []byte             `json:"raw_body"`
-	ContentType  pgtype.Text        `json:"content_type"`
-	ParsedBody   []byte             `json:"parsed_body"`
-	DedupeKey    pgtype.Text        `json:"dedupe_key"`
-	Verified     bool               `json:"verified"`
-	ReceivedAt   pgtype.Timestamptz `json:"received_at"`
-	SearchVector interface{}        `json:"search_vector"`
+	ID            pgtype.UUID        `json:"id"`
+	TenantID      pgtype.UUID        `json:"tenant_id"`
+	SourceID      pgtype.UUID        `json:"source_id"`
+	RawHeaders    []byte             `json:"raw_headers"`
+	RawBody       []byte             `json:"raw_body"`
+	ContentType   pgtype.Text        `json:"content_type"`
+	ParsedBody    []byte             `json:"parsed_body"`
+	DedupeKey     pgtype.Text        `json:"dedupe_key"`
+	Verified      bool               `json:"verified"`
+	ReceivedAt    pgtype.Timestamptz `json:"received_at"`
+	SearchVector  interface{}        `json:"search_vector"`
+	DroppedReason pgtype.Text        `json:"dropped_reason"`
 }
 
 type InstanceSetting struct {

@@ -15,6 +15,7 @@ import (
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/rules"
 	"webhook-gateway/internal/sourcedef"
 )
 
@@ -133,11 +134,60 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fan out to every destination this source is routed to
-	if _, err := queue.EnqueueDeliveries(ctx, h.river, tx, qtx, source.TenantID, source.ID, event.ID); err != nil {
-		slog.Error("enqueuing deliveries", "error", err)
+	// Rules (BR-14): the first matching enabled rule may drop the event or
+	// override the fan-out set. Evaluated inside the event's tx so the
+	// decision and its consequences commit atomically. Replays deliberately
+	// bypass this — replaying a dropped event is an explicit operator override.
+	ruleRows, err := qtx.ListEnabledRulesForSource(ctx, source.ID)
+	if err != nil {
+		slog.Error("loading rules", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
+	}
+	decision := rules.Evaluate(ruleRows, ruleInput(parsedBody, rawHeaders, source))
+
+	switch decision.Action {
+	case rules.ActionDrop:
+		// Stored but not fanned out; dropped_reason records which rule said so.
+		if err := qtx.MarkEventDropped(ctx, db.MarkEventDroppedParams{
+			ID:            event.ID,
+			DroppedReason: pgtype.Text{String: decision.RuleName, Valid: true},
+		}); err != nil {
+			slog.Error("marking event dropped", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	case rules.ActionRoute:
+		rows, err := qtx.ListDeliveryTargetsByDestinationIDs(ctx, db.ListDeliveryTargetsByDestinationIDsParams{
+			DestinationIds: decision.RouteDestinationIDs,
+			TenantID:       source.TenantID,
+		})
+		if err != nil {
+			slog.Error("loading rule route destinations", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		targets := make([]queue.DeliveryTarget, len(rows))
+		for i, row := range rows {
+			targets[i] = queue.DeliveryTarget{
+				DestinationID:      row.DestinationID,
+				MaxAttempts:        row.MaxAttempts,
+				BackoffBaseSeconds: row.BackoffBaseSeconds,
+				BackoffMaxSeconds:  row.BackoffMaxSeconds,
+			}
+		}
+		if _, err := queue.EnqueueDeliveriesTo(ctx, h.river, tx, qtx, source.TenantID, event.ID, targets); err != nil {
+			slog.Error("enqueuing rule-routed deliveries", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	default:
+		// Fan out to every destination this source is routed to
+		if _, err := queue.EnqueueDeliveries(ctx, h.river, tx, qtx, source.TenantID, source.ID, event.ID); err != nil {
+			slog.Error("enqueuing deliveries", "error", err)
+			writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -149,6 +199,23 @@ func (h *Handler) ingest(w http.ResponseWriter, r *http.Request) {
 
 	// Ack only after the commit: the event is durable before the provider hears 200.
 	writeJSON(w, http.StatusOK, map[string]bool{"received": true})
+}
+
+// ruleInput shapes the stored event fields for rule evaluation. Unmarshal
+// failures leave the field nil — expressions over it then error per-rule and
+// fail open, matching the package's "broken rule never blocks ingest" rule.
+func ruleInput(parsedBody, rawHeaders []byte, source db.Source) rules.Input {
+	var body any
+	if parsedBody != nil {
+		_ = json.Unmarshal(parsedBody, &body)
+	}
+	var headers map[string]any
+	_ = json.Unmarshal(rawHeaders, &headers)
+	return rules.Input{
+		Body:    body,
+		Headers: headers,
+		Source:  map[string]any{"name": source.Name, "provider_type": source.ProviderType},
+	}
 }
 
 // verify runs the source's provider verifier and reports whether the signature

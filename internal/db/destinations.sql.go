@@ -120,6 +120,55 @@ func (q *Queries) InsertDestination(ctx context.Context, arg InsertDestinationPa
 	return i, err
 }
 
+const listDeliveryTargetsByDestinationIDs = `-- name: ListDeliveryTargetsByDestinationIDs :many
+SELECT d.id AS destination_id,
+       d.max_attempts,
+       d.backoff_base_seconds,
+       d.backoff_max_seconds
+FROM destinations d
+WHERE d.id = ANY($1::uuid[]) AND d.tenant_id = $2
+`
+
+type ListDeliveryTargetsByDestinationIDsParams struct {
+	DestinationIds []pgtype.UUID `json:"destination_ids"`
+	TenantID       pgtype.UUID   `json:"tenant_id"`
+}
+
+type ListDeliveryTargetsByDestinationIDsRow struct {
+	DestinationID      pgtype.UUID `json:"destination_id"`
+	MaxAttempts        int32       `json:"max_attempts"`
+	BackoffBaseSeconds int32       `json:"backoff_base_seconds"`
+	BackoffMaxSeconds  int32       `json:"backoff_max_seconds"`
+}
+
+// The rule action='route' fan-out override: same row shape as
+// ListEnabledDeliveryTargetsForSource but selected by explicit destination
+// ids instead of the routes join. Unknown ids are silently absent.
+func (q *Queries) ListDeliveryTargetsByDestinationIDs(ctx context.Context, arg ListDeliveryTargetsByDestinationIDsParams) ([]ListDeliveryTargetsByDestinationIDsRow, error) {
+	rows, err := q.db.Query(ctx, listDeliveryTargetsByDestinationIDs, arg.DestinationIds, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListDeliveryTargetsByDestinationIDsRow
+	for rows.Next() {
+		var i ListDeliveryTargetsByDestinationIDsRow
+		if err := rows.Scan(
+			&i.DestinationID,
+			&i.MaxAttempts,
+			&i.BackoffBaseSeconds,
+			&i.BackoffMaxSeconds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDestinations = `-- name: ListDestinations :many
 SELECT id, tenant_id, name, url, auth_config, timeout_ms, rate_limit_per_second, max_attempts, backoff_base_seconds, backoff_max_seconds, paused_at, created_at, updated_at FROM destinations
 WHERE tenant_id = $1
