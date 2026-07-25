@@ -17,6 +17,7 @@ import (
 	"webhook-gateway/internal/db"
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/tunnel"
 )
 
 // Delivery statuses written to deliveries.status
@@ -38,14 +39,19 @@ type Worker struct {
 	q          *db.Queries
 	httpClient *http.Client
 	pacer      *pacer
+	// tunnels resolves tunnel:// destinations to the socket serving them. It is
+	// the same registry the tunnel HTTP handler writes to, which is why tunnel
+	// delivery requires both to live in one process (see internal/tunnel).
+	tunnels *tunnel.Registry
 }
 
-func NewWorker(pool *pgxpool.Pool, q *db.Queries) *Worker {
+func NewWorker(pool *pgxpool.Pool, q *db.Queries, tunnels *tunnel.Registry) *Worker {
 	return &Worker{
 		pool:       pool,
 		q:          q,
 		httpClient: &http.Client{},
 		pacer:      newPacer(),
+		tunnels:    tunnels,
 	}
 }
 
@@ -103,16 +109,22 @@ func (w *Worker) Work(ctx context.Context, job *river.Job[queue.DeliveryArgs]) e
 		return river.JobSnooze(wait)
 	}
 
-	event, err := w.q.GetEventForDelivery(ctx, delivery.EventID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			slog.Warn("event gone; dropping delivery job", "delivery_id", job.Args.DeliveryID)
-			return nil
+	// A tunnel destination is delivered over its WebSocket rather than HTTP, and
+	// loads the event itself because it forwards the provider's raw headers too.
+	var result attemptResult
+	if tunnel.IsURL(dest.Url) {
+		result = w.dispatchTunnel(ctx, dest, delivery.EventID, job.Args.DeliveryID)
+	} else {
+		event, err := w.q.GetEventForDelivery(ctx, delivery.EventID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				slog.Warn("event gone; dropping delivery job", "delivery_id", job.Args.DeliveryID)
+				return nil
+			}
+			return fmt.Errorf("loading event for delivery %s: %w", job.Args.DeliveryID, err)
 		}
-		return fmt.Errorf("loading event for delivery %s: %w", job.Args.DeliveryID, err)
+		result = w.dispatch(ctx, dest, event, job.Args.DeliveryID)
 	}
-
-	result := w.dispatch(ctx, dest, event, job.Args.DeliveryID)
 	status := deliveryStatus(result, job.Attempt, job.MaxAttempts)
 
 	if err := w.recordAttempt(ctx, deliveryID, status, result); err != nil {
@@ -183,10 +195,13 @@ func (w *Worker) recordAttempt(ctx context.Context, deliveryID pgtype.UUID, stat
 
 // NewClient builds the work-capable River client for the worker role. It
 // registers the delivery, replay, and alert-check workers, and schedules the
-// alert evaluation to run once a minute.
-func NewClient(pool *pgxpool.Pool, q *db.Queries) (*river.Client[pgx.Tx], error) {
+// alert evaluation to run once a minute. tunnels is the registry shared with
+// the tunnel HTTP handler; it may be an empty registry when no tunnel endpoint
+// is mounted in this process, in which case tunnel destinations simply never
+// resolve.
+func NewClient(pool *pgxpool.Pool, q *db.Queries, tunnels *tunnel.Registry) (*river.Client[pgx.Tx], error) {
 	workers := river.NewWorkers()
-	river.AddWorker(workers, NewWorker(pool, q))
+	river.AddWorker(workers, NewWorker(pool, q, tunnels))
 	river.AddWorker(workers, NewReplayWorker(pool, q))
 	river.AddWorker(workers, alerting.NewCheckWorker(q))
 

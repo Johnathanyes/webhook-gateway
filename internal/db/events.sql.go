@@ -73,6 +73,37 @@ func (q *Queries) GetEventForDelivery(ctx context.Context, id pgtype.UUID) (GetE
 	return i, err
 }
 
+const getEventForTunnelDelivery = `-- name: GetEventForTunnelDelivery :one
+SELECT e.id, e.raw_headers, e.raw_body, e.content_type, s.name AS source_name
+FROM events e
+JOIN sources s ON s.id = e.source_id
+WHERE e.id = $1
+`
+
+type GetEventForTunnelDeliveryRow struct {
+	ID          pgtype.UUID `json:"id"`
+	RawHeaders  []byte      `json:"raw_headers"`
+	RawBody     []byte      `json:"raw_body"`
+	ContentType pgtype.Text `json:"content_type"`
+	SourceName  string      `json:"source_name"`
+}
+
+// The tunnel replays the provider's request verbatim into a developer's
+// laptop, so unlike HTTP dispatch it needs the original headers and the source
+// name. Kept separate so plain HTTP delivery doesn't pay to load raw_headers.
+func (q *Queries) GetEventForTunnelDelivery(ctx context.Context, id pgtype.UUID) (GetEventForTunnelDeliveryRow, error) {
+	row := q.db.QueryRow(ctx, getEventForTunnelDelivery, id)
+	var i GetEventForTunnelDeliveryRow
+	err := row.Scan(
+		&i.ID,
+		&i.RawHeaders,
+		&i.RawBody,
+		&i.ContentType,
+		&i.SourceName,
+	)
+	return i, err
+}
+
 const insertEvent = `-- name: InsertEvent :one
 INSERT INTO events (
     tenant_id,

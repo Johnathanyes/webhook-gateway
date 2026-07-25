@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/google/cel-go v0.28.0
 	github.com/prometheus/client_golang v1.24.0
 )

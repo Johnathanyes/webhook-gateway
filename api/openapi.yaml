@@ -39,6 +39,7 @@ tags:
   - name: replays
   - name: api-keys
   - name: ingest
+  - name: tunnel
   - name: system
 
 paths:
@@ -586,6 +587,41 @@ paths:
       security: []
       responses:
         "200": { description: Process is up }
+
+  /api/tunnel:
+    get:
+      tags: [tunnel]
+      summary: Open a local-development tunnel (WebSocket)
+      description: |
+        Upgrades to a WebSocket. While the socket is attached, the gateway
+        registers an ephemeral destination routed from the selected source(s),
+        and pushes matching events down the socket as JSON frames instead of
+        POSTing them over HTTP. The client acks each event with the status code
+        its local handler returned, which is recorded on the delivery exactly as
+        an HTTP response would be. Closing the socket removes the destination,
+        its routes, and any delivery still queued for it.
+
+        The frame schemas are normative in `docs/tunnel-protocol.md`. Because a
+        socket cannot be shared between processes, tunnel delivery requires the
+        WebSocket and the delivery worker to run in the same process (role
+        `all`).
+      security: [{ bearerAuth: [tunnel] }]
+      parameters:
+        - name: source
+          in: query
+          required: false
+          description: Source name to tunnel. Omit, or pass `all`, for every source.
+          schema: { type: string }
+        - name: Upgrade
+          in: header
+          required: true
+          schema: { type: string, enum: [websocket] }
+      responses:
+        "101": { description: Switching Protocols — tunnel attached }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /readyz:
     get:

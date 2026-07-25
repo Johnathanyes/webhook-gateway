@@ -54,6 +54,13 @@ SET paused_at = NULL
 WHERE id = $1 AND tenant_id = $2
 RETURNING *;
 
+-- name: DeleteStaleTunnelDestinations :execrows
+-- Tunnel destinations only exist while a WebSocket is attached to this
+-- process, so any that survive a restart are orphans whose socket is long gone.
+-- Swept at boot; the cascade takes their routes and undelivered deliveries too.
+DELETE FROM destinations
+WHERE tenant_id = $1 AND url LIKE 'tunnel://%';
+
 -- name: ListDeliveryTargetsByDestinationIDs :many
 -- The rule action='route' fan-out override: same row shape as
 -- ListEnabledDeliveryTargetsForSource but selected by explicit destination

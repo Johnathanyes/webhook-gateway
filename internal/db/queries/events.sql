@@ -2,6 +2,15 @@
 SELECT raw_body, content_type FROM events
 WHERE id = $1;
 
+-- name: GetEventForTunnelDelivery :one
+-- The tunnel replays the provider's request verbatim into a developer's
+-- laptop, so unlike HTTP dispatch it needs the original headers and the source
+-- name. Kept separate so plain HTTP delivery doesn't pay to load raw_headers.
+SELECT e.id, e.raw_headers, e.raw_body, e.content_type, s.name AS source_name
+FROM events e
+JOIN sources s ON s.id = e.source_id
+WHERE e.id = $1;
+
 -- name: ListEvents :many
 SELECT id, tenant_id, source_id, content_type, dedupe_key, verified, received_at
 FROM events e

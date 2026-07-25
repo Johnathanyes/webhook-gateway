@@ -76,6 +76,44 @@ func (q *Queries) GetSourceByEndpointPath(ctx context.Context, endpointPath stri
 	return i, err
 }
 
+const getSourceByName = `-- name: GetSourceByName :one
+SELECT id, tenant_id, name, provider_type, endpoint_path, signing_secret_encrypted, signing_secret_key_version, verification_config, dedupe_enabled, dedupe_strategy, dedupe_field_path, dedupe_window_seconds, paused_at, created_at, updated_at FROM sources
+WHERE tenant_id = $1 AND name = $2
+ORDER BY created_at ASC
+LIMIT 1
+`
+
+type GetSourceByNameParams struct {
+	TenantID pgtype.UUID `json:"tenant_id"`
+	Name     string      `json:"name"`
+}
+
+// The tunnel endpoint and the CLI address sources by name, since a
+// developer types `--source stripe`, not a UUID. Source names are not unique,
+// so the oldest match wins deterministically rather than at random.
+func (q *Queries) GetSourceByName(ctx context.Context, arg GetSourceByNameParams) (Source, error) {
+	row := q.db.QueryRow(ctx, getSourceByName, arg.TenantID, arg.Name)
+	var i Source
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Name,
+		&i.ProviderType,
+		&i.EndpointPath,
+		&i.SigningSecretEncrypted,
+		&i.SigningSecretKeyVersion,
+		&i.VerificationConfig,
+		&i.DedupeEnabled,
+		&i.DedupeStrategy,
+		&i.DedupeFieldPath,
+		&i.DedupeWindowSeconds,
+		&i.PausedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const insertSource = `-- name: InsertSource :one
 INSERT INTO sources (
     tenant_id,

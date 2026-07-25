@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/tunnel"
 )
 
 func testEvent() db.GetEventForDeliveryRow {
@@ -33,7 +34,7 @@ func TestDispatchSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := NewWorker(nil, nil)
+	w := NewWorker(nil, nil, tunnel.NewRegistry())
 	dest := db.Destination{Url: srv.URL, TimeoutMs: 5000}
 
 	res := w.dispatch(context.Background(), dest, testEvent(), "delivery-123")
@@ -69,7 +70,7 @@ func TestDispatchRetryable5xx(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := NewWorker(nil, nil)
+	w := NewWorker(nil, nil, tunnel.NewRegistry())
 	dest := db.Destination{Url: srv.URL, TimeoutMs: 5000}
 
 	res := w.dispatch(context.Background(), dest, testEvent(), "d")
@@ -92,7 +93,7 @@ func TestDispatchTerminal4xx(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(code)
 		}))
-		res := NewWorker(nil, nil).dispatch(context.Background(), db.Destination{Url: srv.URL, TimeoutMs: 5000}, testEvent(), "d")
+		res := NewWorker(nil, nil, tunnel.NewRegistry()).dispatch(context.Background(), db.Destination{Url: srv.URL, TimeoutMs: 5000}, testEvent(), "d")
 		srv.Close()
 
 		if res.succeeded {
@@ -111,7 +112,7 @@ func TestDispatchRetryable429(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	res := NewWorker(nil, nil).dispatch(context.Background(), db.Destination{Url: srv.URL, TimeoutMs: 5000}, testEvent(), "d")
+	res := NewWorker(nil, nil, tunnel.NewRegistry()).dispatch(context.Background(), db.Destination{Url: srv.URL, TimeoutMs: 5000}, testEvent(), "d")
 	if res.succeeded || !res.retryable {
 		t.Errorf("429: succeeded=%v retryable=%v, want false/true", res.succeeded, res.retryable)
 	}
@@ -126,7 +127,7 @@ func TestDispatchTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := NewWorker(nil, nil)
+	w := NewWorker(nil, nil, tunnel.NewRegistry())
 	dest := db.Destination{Url: srv.URL, TimeoutMs: 50}
 
 	start := time.Now()
@@ -155,7 +156,7 @@ func TestDispatchDefaultTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	w := NewWorker(nil, nil)
+	w := NewWorker(nil, nil, tunnel.NewRegistry())
 	dest := db.Destination{Url: srv.URL, TimeoutMs: 0}
 
 	res := w.dispatch(context.Background(), dest, testEvent(), "d")

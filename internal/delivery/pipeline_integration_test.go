@@ -39,6 +39,7 @@ import (
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
 	"webhook-gateway/internal/tenancy"
+	"webhook-gateway/internal/tunnel"
 )
 
 const (
@@ -53,6 +54,7 @@ type harness struct {
 	q            *db.Queries
 	mux          *http.ServeMux
 	insertClient *river.Client[pgx.Tx]
+	tunnels      *tunnel.Registry
 }
 
 // newHarness boots the ingest handler + recover endpoint against the compose
@@ -83,13 +85,18 @@ func newHarness(t *testing.T) *harness {
 	api.RegisterDeliveries(mux, pool, q, insertClient, authz)
 	api.RegisterReplay(mux, pool, q, insertClient, authz)
 
-	return &harness{pool: pool, q: q, mux: mux, insertClient: insertClient}
+	tunnels := tunnel.NewRegistry()
+	if err := tunnel.Register(context.Background(), mux, q, authz, tunnels); err != nil {
+		t.Fatalf("tunnel register: %v", err)
+	}
+
+	return &harness{pool: pool, q: q, mux: mux, insertClient: insertClient, tunnels: tunnels}
 }
 
 // startWorker starts a real delivery worker and stops it on cleanup.
 func (h *harness) startWorker(t *testing.T) {
 	t.Helper()
-	client, err := NewClient(h.pool, h.q)
+	client, err := NewClient(h.pool, h.q, h.tunnels)
 	if err != nil {
 		t.Fatalf("worker client: %v", err)
 	}

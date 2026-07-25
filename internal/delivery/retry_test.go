@@ -8,6 +8,7 @@ import (
 	"github.com/riverqueue/river/rivertype"
 
 	"webhook-gateway/internal/queue"
+	"webhook-gateway/internal/tunnel"
 )
 
 func TestBackoffWithJitter(t *testing.T) {
@@ -50,7 +51,7 @@ func TestBackoffWithJitter(t *testing.T) {
 }
 
 func TestNextRetry(t *testing.T) {
-	w := NewWorker(nil, nil)
+	w := NewWorker(nil, nil, tunnel.NewRegistry())
 
 	t.Run("no snapshot falls back to River default", func(t *testing.T) {
 		job := &river.Job[queue.DeliveryArgs]{

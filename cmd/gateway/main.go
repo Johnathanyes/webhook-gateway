@@ -22,6 +22,7 @@ import (
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/sourcedef"
+	"webhook-gateway/internal/tunnel"
 	"webhook-gateway/internal/api/middleware"
 )
 
@@ -65,6 +66,11 @@ func run() error {
 		return err
 	}
 	slog.Info("migrations applied")
+
+	// One registry per process, shared by the tunnel endpoint that accepts
+	// sockets and the delivery worker that pushes events into them. Tunnel
+	// delivery therefore only works when both run here — i.e. role "all".
+	tunnels := tunnel.NewRegistry()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", observability.Health)
@@ -120,11 +126,14 @@ func run() error {
 		// Key management deliberately stays on the admin password alone —
 		// an API key must never be able to mint or revoke keys.
 		api.RegisterAPIKeys(mux, q, cfg.AdminPassword)
-		slog.Info("destinations, routes, rules, deliveries, events, replay, and api-keys API mounted")
+		if err := tunnel.Register(ctx, mux, q, authz, tunnels); err != nil {
+			return err
+		}
+		slog.Info("destinations, routes, rules, deliveries, events, replay, api-keys, and tunnel API mounted")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {
-		workerClient, err := delivery.NewClient(pool, db.New(pool))
+		workerClient, err := delivery.NewClient(pool, db.New(pool), tunnels)
 		if err != nil {
 			return err
 		}

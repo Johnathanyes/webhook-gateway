@@ -29,6 +29,22 @@ func (q *Queries) DeleteDestination(ctx context.Context, arg DeleteDestinationPa
 	return result.RowsAffected(), nil
 }
 
+const deleteStaleTunnelDestinations = `-- name: DeleteStaleTunnelDestinations :execrows
+DELETE FROM destinations
+WHERE tenant_id = $1 AND url LIKE 'tunnel://%'
+`
+
+// Tunnel destinations only exist while a WebSocket is attached to this
+// process, so any that survive a restart are orphans whose socket is long gone.
+// Swept at boot; the cascade takes their routes and undelivered deliveries too.
+func (q *Queries) DeleteStaleTunnelDestinations(ctx context.Context, tenantID pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteStaleTunnelDestinations, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getDestination = `-- name: GetDestination :one
 SELECT id, tenant_id, name, url, auth_config, timeout_ms, rate_limit_per_second, max_attempts, backoff_base_seconds, backoff_max_seconds, paused_at, created_at, updated_at FROM destinations
 WHERE id = $1 AND tenant_id = $2
