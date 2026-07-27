@@ -1,10 +1,5 @@
 #!/usr/bin/env bash
 #
-# Phase 1 end-to-end done-test (Task 8). Proves the whole pipeline against a
-# running stack: boot Postgres + the gateway, create a source over the admin
-# API, send a Stripe-signed webhook, and assert it lands in the events table
-# with verified=true — then send a tampered one and assert verified=false.
-#
 # Usage:  test/e2e.sh        (or: make e2e)
 #
 # Requires: docker compose, go, curl, openssl. Uses the same dev credentials as
@@ -46,10 +41,10 @@ trap cleanup EXIT
 
 # Wait for the health endpoint (up to ~10s).
 for _ in $(seq 1 20); do
-  if curl -fsS "${BASE}/healthz" >/dev/null 2>&1; then break; fi
+  if curl -fsS "${BASE}/health" >/dev/null 2>&1; then break; fi
   sleep 0.5
 done
-curl -fsS "${BASE}/healthz" >/dev/null || fail "gateway never became healthy (see /tmp/gateway-e2e.log)"
+curl -fsS "${BASE}/health" >/dev/null || fail "gateway never became healthy (see /tmp/gateway-e2e.log)"
 pass "gateway healthy"
 
 # --- create a Stripe source ---

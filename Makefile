@@ -9,7 +9,8 @@ export ADMIN_PASSWORD ?= dev-password
 export ENCRYPTION_KEY ?= $(shell printf 'dev-32-byte-encryption-key-00000' | base64)
 export LOG_FORMAT ?= text
 
-.PHONY: db-up db-down db-reset run build tidy test test-integration e2e
+.PHONY: db-up db-down db-reset run build tidy test test-integration e2e \
+        cli-build cli-test e2e-tunnel
 
 # Start dependencies and block until Postgres is accepting connections.
 db-up:
@@ -33,6 +34,14 @@ build:
 tidy:
 	go mod tidy
 
+# The CLI is a separate module (its own go.mod, and its own license per BR-53),
+# so it is built and tested separately from the gateway.
+cli-build:
+	cd cli && go build -o bin/whg .
+
+cli-test:
+	cd cli && go test -race ./...
+
 # Unit tests only, with the race detector. Integration tests skip themselves
 # when TEST_DATABASE_URL is unset, so this stays green without a database.
 test:
@@ -47,3 +56,8 @@ test-integration: db-up
 # drives a signed + tampered webhook through the real HTTP pipeline.
 e2e: db-up
 	trap '$(MAKE) db-down' EXIT; ./test/e2e.sh
+
+# Phase 5 done-test: the whole local dev loop — gateway + `whg listen` + a local
+# sink — proving a signed webhook comes back out on localhost.
+e2e-tunnel: db-up
+	trap '$(MAKE) db-down' EXIT; ./test/e2e-tunnel.sh

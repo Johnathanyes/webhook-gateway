@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#
+# Phase 5 tunnel end-to-end done-test (Tasks 26–28). Proves the whole local dev
+# loop against a running stack: boot Postgres + the gateway, mint a scoped API
+# key, log the CLI in, start `whg listen` pointed at a local sink, send a
+# Stripe-signed webhook to the gateway, and assert it comes back out on
+# localhost with its signature intact and the delivery marked succeeded.
+#
+# Usage:  test/e2e-tunnel.sh        (or: make e2e-tunnel)
+#
+# Requires: docker compose, go, curl, openssl, python3. Uses the same dev
+# credentials as the Makefile so `make db-up` and this script agree on Postgres.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+# --- config: matches the Makefile's dev defaults ---
+export DATABASE_URL="${DATABASE_URL:-postgres://gateway:gateway@localhost:5432/gateway?sslmode=disable}"
+export ADMIN_PASSWORD="${ADMIN_PASSWORD:-dev-password}"
+export ENCRYPTION_KEY="${ENCRYPTION_KEY:-$(printf 'dev-32-byte-encryption-key-00000' | base64)}"
+export LOG_FORMAT="${LOG_FORMAT:-text}"
+export PORT="${PORT:-8080}"
+BASE="http://localhost:${PORT}"
+SECRET="whsec_tunnel_e2e_secret"
+SINK_PORT="${SINK_PORT:-13000}"
+SOURCE_NAME="e2e-tunnel-stripe"
+
+WORKDIR=$(mktemp -d)
+# The CLI writes its credentials under XDG_CONFIG_HOME; pointing it at a temp
+# directory keeps the developer's real ~/.config/whg untouched.
+export XDG_CONFIG_HOME="${WORKDIR}/xdg"
+
+pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+fail() { printf '  \033[31m✗ %s\033[0m\n' "$1"; exit 1; }
+
+psql_q() { docker compose exec -T postgres psql -U gateway -d gateway -tAc "$1"; }
+
+# --- bring up dependencies ---
+echo "==> starting Postgres"
+docker compose up -d --wait >/dev/null
+
+echo "==> building CLI"
+(cd cli && go build -o bin/whg .)
+WHG="./cli/bin/whg"
+
+echo "==> starting gateway"
+go run ./cmd/gateway >"${WORKDIR}/gateway.log" 2>&1 &
+GATEWAY_PID=$!
+
+cleanup() {
+  kill "${LISTEN_PID:-}" >/dev/null 2>&1 || true
+  kill "${SINK_PID:-}" >/dev/null 2>&1 || true
+  [ -n "${SOURCE_PATH:-}" ] && psql_q "
+    DELETE FROM events WHERE source_id = (SELECT id FROM sources WHERE endpoint_path='${SOURCE_PATH}');
+    DELETE FROM sources WHERE endpoint_path='${SOURCE_PATH}';
+    DELETE FROM api_keys WHERE name='e2e-tunnel-key';" >/dev/null 2>&1 || true
+  kill "$GATEWAY_PID" >/dev/null 2>&1 || true
+  # Reap the backgrounded jobs so bash doesn't print "Terminated" after the
+  # final PASS line, which reads like a failure.
+  wait "$GATEWAY_PID" 2>/dev/null || true
+  rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+for _ in $(seq 1 40); do
+  curl -fsS "${BASE}/health" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+curl -fsS "${BASE}/health" >/dev/null || fail "gateway never became healthy (see ${WORKDIR}/gateway.log)"
+pass "gateway healthy"
+
+# --- a local sink that records what it receives ---
+cat >"${WORKDIR}/sink.py" <<'PY'
+import http.server, json, sys, threading
+
+received = []
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        with open(sys.argv[2], 'a') as f:
+            f.write(json.dumps({
+                'body': body.decode('utf-8', 'replace'),
+                'stripe_signature': self.headers.get('Stripe-Signature', ''),
+                'webhook_id': self.headers.get('Webhook-Id', ''),
+            }) + "\n")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'ok')
+
+    def log_message(self, *args):
+        pass
+
+http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+PY
+
+RECEIVED="${WORKDIR}/received.jsonl"
+: >"$RECEIVED"
+python3 "${WORKDIR}/sink.py" "$SINK_PORT" "$RECEIVED" &
+SINK_PID=$!
+for _ in $(seq 1 20); do
+  curl -fsS -X POST "http://127.0.0.1:${SINK_PORT}/" -d '{}' >/dev/null 2>&1 && break
+  sleep 0.25
+done
+: >"$RECEIVED"  # discard the readiness probe
+pass "local sink listening on 127.0.0.1:${SINK_PORT}"
+
+# --- create a Stripe source ---
+CREATE_RESP=$(curl -fsS -X POST "${BASE}/api/sources" \
+  -H "Authorization: Bearer ${ADMIN_PASSWORD}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"${SOURCE_NAME}\",\"provider_type\":\"stripe\",\"signing_secret\":\"${SECRET}\"}")
+SOURCE_PATH=$(printf '%s' "$CREATE_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["endpoint_path"])')
+[ -n "$SOURCE_PATH" ] || fail "could not parse endpoint_path from: $CREATE_RESP"
+pass "source created: ${SOURCE_NAME} (${SOURCE_PATH})"
+
+# --- mint a scoped API key and log the CLI in ---
+API_KEY=$(curl -fsS -X POST "${BASE}/api/api-keys" \
+  -H "Authorization: Bearer ${ADMIN_PASSWORD}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-tunnel-key","scopes":["read","tunnel"]}' \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["key"])')
+[ -n "$API_KEY" ] || fail "could not mint an API key"
+
+$WHG login --url "$BASE" --api-key "$API_KEY" >/dev/null || fail "whg login failed"
+pass "whg login round-tripped an authenticated GET /api/sources"
+
+# --- attach the tunnel ---
+$WHG listen --source "$SOURCE_NAME" --forward-to "127.0.0.1:${SINK_PORT}" \
+  >"${WORKDIR}/listen.log" 2>&1 &
+LISTEN_PID=$!
+
+for _ in $(seq 1 40); do
+  grep -q "tunnel ready" "${WORKDIR}/listen.log" 2>/dev/null && break
+  sleep 0.25
+done
+grep -q "tunnel ready" "${WORKDIR}/listen.log" \
+  || fail "whg listen never became ready: $(cat "${WORKDIR}/listen.log")"
+pass "whg listen attached"
+
+# --- send a validly Stripe-signed webhook to the gateway ---
+BODY='{"id":"evt_tunnel_e2e","type":"payment_intent.succeeded"}'
+TS=$(date +%s)
+SIG=$(printf '%s' "${TS}.${BODY}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $NF}')
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/ingest/${SOURCE_PATH}" \
+  -H 'Content-Type: application/json' \
+  -H "Stripe-Signature: t=${TS},v1=${SIG}" \
+  -d "${BODY}")
+[ "$CODE" = "200" ] || fail "signed request returned ${CODE}, want 200"
+pass "signed webhook accepted by the gateway"
+
+# --- it should come back out on localhost ---
+for _ in $(seq 1 60); do
+  [ -s "$RECEIVED" ] && break
+  sleep 0.25
+done
+[ -s "$RECEIVED" ] || fail "no event reached the local sink within 15s: $(cat "${WORKDIR}/listen.log")"
+
+GOT_BODY=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["body"])' "$RECEIVED")
+[ "$GOT_BODY" = "$BODY" ] || fail "sink body mismatch:\n  got:  ${GOT_BODY}\n  want: ${BODY}"
+pass "event reached localhost with a byte-exact body"
+
+GOT_SIG=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["stripe_signature"])' "$RECEIVED")
+[ "$GOT_SIG" = "t=${TS},v1=${SIG}" ] || fail "Stripe-Signature not preserved: got '${GOT_SIG}'"
+pass "provider signature header preserved (local verification would pass)"
+
+GOT_ID=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["webhook_id"])' "$RECEIVED")
+[ -n "$GOT_ID" ] || fail "Webhook-Id header missing"
+pass "Webhook-Id set, matching HTTP dispatch"
+
+# --- the ack should have driven the delivery to succeeded ---
+for _ in $(seq 1 40); do
+  STATUS=$(psql_q "SELECT status FROM deliveries WHERE id = '${GOT_ID}'" | tr -d '[:space:]')
+  [ "$STATUS" = "succeeded" ] && break
+  sleep 0.25
+done
+[ "$STATUS" = "succeeded" ] || fail "delivery ${GOT_ID} status is '${STATUS}', want succeeded"
+pass "ack recorded: delivery marked succeeded"
+
+grep -qE "${SOURCE_NAME} payment_intent\.succeeded → 200" "${WORKDIR}/listen.log" \
+  || fail "expected log line missing:\n$(cat "${WORKDIR}/listen.log")"
+pass "listen logged one readable line per event"
+
+# --- disconnecting must leave no dangling destination ---
+kill "$LISTEN_PID" >/dev/null 2>&1 || true
+LISTEN_PID=""
+for _ in $(seq 1 40); do
+  LEFTOVER=$(psql_q "SELECT count(*) FROM destinations WHERE url LIKE 'tunnel://%'" | tr -d '[:space:]')
+  [ "$LEFTOVER" = "0" ] && break
+  sleep 0.25
+done
+[ "$LEFTOVER" = "0" ] || fail "${LEFTOVER} tunnel destination(s) left behind after disconnect"
+pass "disconnect cleaned up the ephemeral destination"
+
+echo "==> PASS: tunnel end-to-end dev loop verified"
