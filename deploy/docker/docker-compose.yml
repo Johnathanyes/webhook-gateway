@@ -1,0 +1,87 @@
+# Self-hosting / quickstart stack: the gateway plus its only dependency.
+#
+#   cd deploy/docker
+#   cp .env.example .env      # then fill in both values (see the file)
+#   docker compose up -d --wait
+#
+# The README quickstart walks this end to end. For local *development* of the
+# gateway itself, use the repo-root compose.yaml instead — that one runs only
+# Postgres so the gateway can run on your host without an image rebuild.
+name: webhook-gateway
+
+services:
+  postgres:
+    # Pinned to 18: the schema uses uuidv7(), native only in Postgres 18+.
+    image: postgres:18
+    environment:
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway}
+      POSTGRES_DB: gateway
+    volumes:
+      # Postgres 18+ expects the mount at /var/lib/postgresql (not .../data),
+      # so pg_upgrade --link works without crossing a mount boundary.
+      - pgdata:/var/lib/postgresql
+    # Deliberately not published to the host: nothing outside this network
+    # needs Postgres, and port 5432 is often already taken.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    environment:
+      DATABASE_URL: postgres://gateway:${POSTGRES_PASSWORD:-gateway}@postgres:5432/gateway?sslmode=disable
+      # Both are required and have no default on purpose — an admin password
+      # or an encryption key shipped in a repo is not a secret.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in deploy/docker/.env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in deploy/docker/.env (openssl rand -base64 32)}
+      LOG_FORMAT: json
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      # Migrations run on boot, so give the first check some room.
+      start_period: 20s
+    restart: unless-stopped
+
+  # A throwaway destination so the quickstart can show a webhook being
+  # *delivered*, not just received. Opt in with `--profile demo`; the default
+  # stack is gateway + Postgres and nothing else. Do not run this in prod.
+  sink:
+    profiles: [demo]
+    image: python:3.13-alpine
+    command:
+      - python
+      - -c
+      - |
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                print('delivered %s %s' % (
+                    self.headers.get('Webhook-Id', '-'),
+                    body.decode('utf-8', 'replace'),
+                ), flush=True)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'ok')
+
+            def log_message(self, *args):
+                pass
+
+        http.server.HTTPServer(('0.0.0.0', 3000), Handler).serve_forever()
+
+volumes:
+  pgdata:

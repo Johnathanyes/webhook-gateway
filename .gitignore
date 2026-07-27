@@ -2,3 +2,4 @@ MVP.md
 SECURITY.md
 graphify-out
 cli/bin/
+deploy/docker/.env

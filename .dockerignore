@@ -1,0 +1,12 @@
+# Keep the build context to what `go build ./cmd/gateway` actually needs.
+# The binary embeds its migrations and provider catalog, so everything below
+# is dead weight in the image build.
+.git
+.github
+.claude
+.codegraph
+graphify-out
+cli/bin
+web/dashboard/node_modules
+test
+*.md
