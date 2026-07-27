@@ -247,6 +247,9 @@ func testDB(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	if err := queue.Migrate(ctx, pool); err != nil {
+		t.Fatalf("river migrate: %v", err)
+	}
 	return pool
 }
 

@@ -16,6 +16,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -63,6 +64,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	pool := testDB(t)
+	assertNoForeignWorker(t, pool)
 	q := db.New(pool)
 
 	enc, err := crypto.NewEncryptor(testEncryptionKey)
@@ -856,4 +858,30 @@ func testDB(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// assertNoForeignWorker fails fast when another River client with a delivery
+// worker is already running against this database — a stray `make run` or a
+// leftover e2e gateway. It works the same queue, so it steals these tests'
+// jobs and applies its own configuration: the symptoms are a delivery that
+// succeeds before the test starts a worker, or a paused job snoozed for the
+// production 30s instead of the interval the test set. Neither points anywhere
+// near the real cause, hence the explicit check.
+//
+// Only clients that run workers elect a leader; the insert-only clients this
+// harness builds do not, so a live row can only belong to another process.
+func assertNoForeignWorker(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	var leaderID string
+	err := pool.QueryRow(context.Background(),
+		"SELECT leader_id FROM river_leader WHERE expires_at > now()").Scan(&leaderID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return
+	}
+	if err != nil {
+		t.Fatalf("checking for a foreign River worker: %v", err)
+	}
+	t.Fatalf("another River worker (%s) is working %s — a stray `make run` or "+
+		"e2e gateway will steal these tests' jobs. Stop it and re-run.",
+		leaderID, os.Getenv("TEST_DATABASE_URL"))
 }

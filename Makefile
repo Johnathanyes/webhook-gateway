@@ -48,9 +48,10 @@ test:
 	go test -race ./...
 
 # Full test suite including the Postgres-backed integration tests. Needs the
-# compose Postgres up (`make db-up`); TEST_DATABASE_URL points the tests at it.
+# compose Postgres up — this target brings it up itself; TEST_DATABASE_URL
+# points the tests at it.
 test-integration: db-up
-	TEST_DATABASE_URL=$(DATABASE_URL) go test -race ./...
+	TEST_DATABASE_URL=$(DATABASE_URL) go test -race -p 1 -count=1 ./...
 
 # Phase 1 end-to-end done-test: boots the gateway against compose Postgres and
 # drives a signed + tampered webhook through the real HTTP pipeline.

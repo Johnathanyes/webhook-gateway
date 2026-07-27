@@ -67,8 +67,11 @@ echo "==> building CLI"
 (cd cli && go build -o bin/whg .)
 WHG="./cli/bin/whg"
 
+echo "==> building gateway"
+go build -o "${WORKDIR}/gateway" ./cmd/gateway
+
 echo "==> starting gateway"
-go run ./cmd/gateway >"${WORKDIR}/gateway.log" 2>&1 &
+"${WORKDIR}/gateway" >"${WORKDIR}/gateway.log" 2>&1 &
 GATEWAY_PID=$!
 
 cleanup() {

@@ -11,6 +11,7 @@ permissions:
 jobs:
   build-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -22,15 +23,117 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
-  lint:
+  # The same suite against a real database, so the Postgres-backed test files
+  # actually run instead of silently skipping.
+  integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        # 18 for uuidv7(), matching compose.yaml.
+        image: postgres:18
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+          POSTGRES_DB: gateway
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://gateway:gateway@localhost:5432/gateway?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
+      # -p 1 serializes packages. Every integration package runs the goose and
+      # River migrations on entry, goose takes no session lock, and against a
+      # fresh database concurrent packages would collide. -coverpkg spans the
+      # module so integration tests get credit for the packages they drive.
+      - name: Test with Postgres
+        run: |
+          go test -race -p 1 \
+            -coverprofile=coverage.out -covermode=atomic -coverpkg=./... \
+            ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
+  # cli/ is its own module (its own go.mod and its own license per BR-53), so
+  # the root `go build ./...` never sees it.
+  cli:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test -race ./...
+
+  # The done-tests: real HTTP through a real gateway process. Both scripts
+  # bring up their own compose Postgres, so no service container here.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Phase 1 ingest pipeline
+        run: ./test/e2e.sh
+      - name: Phase 5 tunnel dev loop
+        run: ./test/e2e-tunnel.sh
+
+  # The quickstart image is a shipped artifact. A broken Dockerfile should
+  # fail here, not on a self-hoster's first `docker compose up`.
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -f deploy/docker/Dockerfile -t webhook-gateway:ci .
+      - name: Validate quickstart compose
+        # Dummy values only to satisfy the required-variable checks; config
+        # parses the file without starting anything.
+        run: ADMIN_PASSWORD=ci ENCRYPTION_KEY=ci docker compose -f deploy/docker/docker-compose.yml --profile demo config -q
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Pinned: `latest` means a new golangci-lint release can turn a green
+      # branch red with no change of ours.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.12.2
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: cli

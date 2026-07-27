@@ -27,8 +27,12 @@ psql_q() { docker compose exec -T postgres psql -U gateway -d gateway -tAc "$1";
 echo "==> starting Postgres"
 docker compose up -d --wait >/dev/null
 
+echo "==> building gateway"
+BINDIR=$(mktemp -d)
+go build -o "${BINDIR}/gateway" ./cmd/gateway
+
 echo "==> starting gateway"
-go run ./cmd/gateway >/tmp/gateway-e2e.log 2>&1 &
+"${BINDIR}/gateway" >/tmp/gateway-e2e.log 2>&1 &
 GATEWAY_PID=$!
 
 cleanup() {
@@ -36,6 +40,8 @@ cleanup() {
     "DELETE FROM events WHERE source_id = (SELECT id FROM sources WHERE endpoint_path='${SOURCE_PATH}');
      DELETE FROM sources WHERE endpoint_path='${SOURCE_PATH}';" >/dev/null 2>&1 || true
   kill "$GATEWAY_PID" >/dev/null 2>&1 || true
+  wait "$GATEWAY_PID" 2>/dev/null || true
+  rm -rf "$BINDIR"
 }
 trap cleanup EXIT
 
