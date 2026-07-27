@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
-# Phase 5 tunnel end-to-end done-test (Tasks 26–28). Proves the whole local dev
-# loop against a running stack: boot Postgres + the gateway, mint a scoped API
-# key, log the CLI in, start `whg listen` pointed at a local sink, send a
-# Stripe-signed webhook to the gateway, and assert it comes back out on
-# localhost with its signature intact and the delivery marked succeeded.
+# Phase 5 end-to-end done-test (Tasks 26–30). Proves the whole local dev loop
+# against a running stack: boot Postgres + the gateway, mint a scoped API key,
+# log the CLI in, start `whg listen` pointed at a local sink, then
+#
+#   26/28  send a Stripe-signed webhook and assert it comes back out on
+#          localhost with its signature intact and the delivery succeeded
+#   30     `whg trigger` a signed sample event with no provider involved
+#   29     `whg replay` a stored event straight to localhost, byte-for-byte
+#
+# and finally that detaching leaves no dangling tunnel destination.
 #
 # Usage:  test/e2e-tunnel.sh        (or: make e2e-tunnel)
 #
@@ -34,6 +39,25 @@ pass() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31m✗ %s\033[0m\n' "$1"; exit 1; }
 
 psql_q() { docker compose exec -T postgres psql -U gateway -d gateway -tAc "$1"; }
+
+# sink_field <line-index> <field> — read one field from the Nth request the
+# local sink recorded, so each stage can assert on its own delivery.
+sink_field() {
+  python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readlines()[int(sys.argv[2])])[sys.argv[3]])' \
+    "$RECEIVED" "$1" "$2"
+}
+
+# sink_count — how many requests the local sink has received so far.
+sink_count() { wc -l <"$RECEIVED" | tr -d '[:space:]'; }
+
+# wait_for_sink <n> — block until the sink has recorded at least n requests.
+wait_for_sink() {
+  for _ in $(seq 1 60); do
+    [ "$(sink_count)" -ge "$1" ] && return 0
+    sleep 0.25
+  done
+  return 1
+}
 
 # --- bring up dependencies ---
 echo "==> starting Postgres"
@@ -118,7 +142,7 @@ pass "source created: ${SOURCE_NAME} (${SOURCE_PATH})"
 API_KEY=$(curl -fsS -X POST "${BASE}/api/api-keys" \
   -H "Authorization: Bearer ${ADMIN_PASSWORD}" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"e2e-tunnel-key","scopes":["read","tunnel"]}' \
+  -d '{"name":"e2e-tunnel-key","scopes":["read","write","tunnel"]}' \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["key"])')
 [ -n "$API_KEY" ] || fail "could not mint an API key"
 
@@ -156,15 +180,15 @@ for _ in $(seq 1 60); do
 done
 [ -s "$RECEIVED" ] || fail "no event reached the local sink within 15s: $(cat "${WORKDIR}/listen.log")"
 
-GOT_BODY=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["body"])' "$RECEIVED")
+GOT_BODY=$(sink_field 0 body)
 [ "$GOT_BODY" = "$BODY" ] || fail "sink body mismatch:\n  got:  ${GOT_BODY}\n  want: ${BODY}"
 pass "event reached localhost with a byte-exact body"
 
-GOT_SIG=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["stripe_signature"])' "$RECEIVED")
+GOT_SIG=$(sink_field 0 stripe_signature)
 [ "$GOT_SIG" = "t=${TS},v1=${SIG}" ] || fail "Stripe-Signature not preserved: got '${GOT_SIG}'"
 pass "provider signature header preserved (local verification would pass)"
 
-GOT_ID=$(python3 -c 'import json,sys; print(json.loads(open(sys.argv[1]).readline())["webhook_id"])' "$RECEIVED")
+GOT_ID=$(sink_field 0 webhook_id)
 [ -n "$GOT_ID" ] || fail "Webhook-Id header missing"
 pass "Webhook-Id set, matching HTTP dispatch"
 
@@ -181,9 +205,55 @@ grep -qE "${SOURCE_NAME} payment_intent\.succeeded → 200" "${WORKDIR}/listen.l
   || fail "expected log line missing:\n$(cat "${WORKDIR}/listen.log")"
 pass "listen logged one readable line per event"
 
-# --- disconnecting must leave no dangling destination ---
+# --- Task 30: `whg trigger` + `whg listen` complete the loop with no provider ---
+TRIGGER_OUT=$($WHG trigger --source "$SOURCE_NAME") || fail "whg trigger failed: ${TRIGGER_OUT}"
+printf '%s' "$TRIGGER_OUT" | grep -q "verified: true" \
+  || fail "triggered sample event was not verified:\n${TRIGGER_OUT}"
+pass "whg trigger sent a signed sample event through real verification"
+
+TRIGGERED_EVENT_ID=$(printf '%s' "$TRIGGER_OUT" | sed -n 's/^Event \([0-9a-f-]*\) stored.*/\1/p')
+[ -n "$TRIGGERED_EVENT_ID" ] || fail "could not parse event id from:\n${TRIGGER_OUT}"
+
+wait_for_sink 2 || fail "triggered event never reached localhost:\n$(cat "${WORKDIR}/listen.log")"
+TRIGGER_BODY=$(sink_field 1 body)
+printf '%s' "$TRIGGER_BODY" | grep -q '"type": "payment_intent.succeeded"' \
+  || fail "sample payload not delivered to localhost: ${TRIGGER_BODY}"
+pass "triggered event delivered to localhost via the tunnel"
+
+TRIGGER_SIG=$(sink_field 1 stripe_signature)
+[ -n "$TRIGGER_SIG" ] || fail "triggered event arrived without a Stripe-Signature header"
+pass "triggered event carried a real generated signature"
+
+# --- Task 29: `whg replay` re-sends a stored event straight to localhost ---
+# Replay does not use the tunnel, so detach first to prove that.
 kill "$LISTEN_PID" >/dev/null 2>&1 || true
+wait "$LISTEN_PID" 2>/dev/null || true
 LISTEN_PID=""
+
+REPLAY_OUT=$($WHG replay "$TRIGGERED_EVENT_ID" --forward-to "127.0.0.1:${SINK_PORT}") \
+  || fail "whg replay failed: ${REPLAY_OUT}"
+printf '%s' "$REPLAY_OUT" | grep -qE "${SOURCE_NAME} payment_intent\.succeeded → 200" \
+  || fail "replay did not report a successful local POST:\n${REPLAY_OUT}"
+pass "whg replay re-sent a stored event with the tunnel detached"
+
+wait_for_sink 3 || fail "replayed event never reached the local sink"
+REPLAY_BODY=$(sink_field 2 body)
+[ "$REPLAY_BODY" = "$TRIGGER_BODY" ] \
+  || fail "replayed body is not byte-equal to the stored event:\n  got:  ${REPLAY_BODY}\n  want: ${TRIGGER_BODY}"
+pass "replayed body byte-equal to the stored event"
+
+REPLAY_SIG=$(sink_field 2 stripe_signature)
+[ "$REPLAY_SIG" = "$TRIGGER_SIG" ] \
+  || fail "replayed Stripe-Signature differs:\n  got:  ${REPLAY_SIG}\n  want: ${TRIGGER_SIG}"
+pass "replayed event preserved the original provider headers"
+
+# --last N --source <name> selects without needing an id.
+LAST_OUT=$($WHG replay --last 1 --source "$SOURCE_NAME" --forward-to "127.0.0.1:${SINK_PORT}") \
+  || fail "whg replay --last failed: ${LAST_OUT}"
+wait_for_sink 4 || fail "--last replay never reached the local sink"
+pass "whg replay --last 1 --source resolved and replayed by name"
+
+# --- the tunnel detached above must have left no dangling destination ---
 for _ in $(seq 1 40); do
   LEFTOVER=$(psql_q "SELECT count(*) FROM destinations WHERE url LIKE 'tunnel://%'" | tr -d '[:space:]')
   [ "$LEFTOVER" = "0" ] && break

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -11,7 +10,6 @@ import (
 
 	"webhook-gateway-cli/internal/build"
 	"webhook-gateway-cli/internal/client"
-	"webhook-gateway-cli/internal/config"
 	"webhook-gateway-cli/internal/tunnel"
 )
 
@@ -39,11 +37,8 @@ func newListenCmd() *cobra.Command {
 }
 
 func runListen(cmd *cobra.Command, source, forwardTo string) error {
-	cfg, err := config.Load()
+	cfg, err := loadCredentials()
 	if err != nil {
-		if errors.Is(err, config.ErrNotLoggedIn) {
-			return fmt.Errorf("not logged in — run `%s login` first", build.Name)
-		}
 		return err
 	}
 

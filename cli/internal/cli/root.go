@@ -2,12 +2,15 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
 
 	"webhook-gateway-cli/internal/build"
+	"webhook-gateway-cli/internal/client"
+	"webhook-gateway-cli/internal/config"
 )
 
 // NewRootCmd builds the command tree. Subcommands are added here so main stays
@@ -23,8 +26,32 @@ func NewRootCmd() *cobra.Command {
 		SilenceErrors: true, // Execute prints the error itself, once
 		Version:       build.Version,
 	}
-	root.AddCommand(newLoginCmd(), newListenCmd(), newVersionCmd())
+	root.AddCommand(newLoginCmd(), newListenCmd(), newReplayCmd(), newTriggerCmd(), newVersionCmd())
 	return root
+}
+
+// loadCredentials reads the stored gateway credentials, turning the
+// "no config yet" case into an instruction rather than a file-not-found error.
+func loadCredentials() (config.Config, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		if errors.Is(err, config.ErrNotLoggedIn) {
+			return config.Config{}, fmt.Errorf("not logged in — run `%s login` first", build.Name)
+		}
+		return config.Config{}, err
+	}
+	return cfg, nil
+}
+
+// gatewayClient builds an API client from the stored credentials. Commands that
+// only speak REST use this; `listen` needs the raw URL and key for its
+// WebSocket, so it calls loadCredentials directly.
+func gatewayClient() (*client.Client, error) {
+	cfg, err := loadCredentials()
+	if err != nil {
+		return nil, err
+	}
+	return client.New(cfg.GatewayURL, cfg.APIKey), nil
 }
 
 // Execute runs the CLI and returns the process exit code.

@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"webhook-gateway-cli/internal/forward"
 )
 
 // Reconnect pacing. A tunnel is a long-lived dev session, so a dropped socket
@@ -163,22 +165,27 @@ func runSession(ctx context.Context, opts Options) (bool, error) {
 
 // handle forwards one event and acks it with whatever the local handler said.
 func (s *session) handle(ctx context.Context, frame EventFrame) {
-	status, elapsed, err := forward(ctx, s.httpClient, s.opts.ForwardTo, frame)
+	res, err := forward.Post(ctx, s.httpClient, forward.Request{
+		Target:    s.opts.ForwardTo,
+		Headers:   frame.Headers,
+		Body:      frame.Body,
+		WebhookID: frame.DeliveryID,
+	})
 
 	ack := AckFrame{
 		Type:       FrameAck,
 		DeliveryID: frame.DeliveryID,
-		DurationMs: int(elapsed.Milliseconds()),
+		DurationMs: int(res.Elapsed.Milliseconds()),
 	}
 	if err != nil {
 		// The local target was never reached; the gateway records the reason
 		// rather than a status code it never got.
 		ack.Error = err.Error()
 	} else {
-		ack.StatusCode = status
+		ack.StatusCode = res.StatusCode
 	}
 
-	s.printEvent(frame, status, elapsed, err)
+	s.printf("%s\n", forward.Line(frame.Source, forward.EventType(frame.Headers, frame.Body), res, err))
 
 	if err := s.writeFrame(ctx, ack); err != nil && ctx.Err() == nil {
 		s.printf("%s failed to ack %s: %v\n", timestamp(), frame.DeliveryID, err)
@@ -201,21 +208,6 @@ func (s *session) printReady(frame ReadyFrame) {
 		scope = "no sources"
 	}
 	s.printf("%s tunnel ready — %s → %s\n", timestamp(), scope, s.opts.ForwardTo)
-}
-
-// printEvent writes the one line per event that makes a tunnel readable:
-//
-//	12:04:31 stripe payment_intent.succeeded → 200 (45ms)
-func (s *session) printEvent(frame EventFrame, status int, elapsed time.Duration, err error) {
-	label := frame.Source
-	if kind := eventType(frame); kind != "" {
-		label += " " + kind
-	}
-	if err != nil {
-		s.printf("%s %s → error: %v (%s)\n", timestamp(), label, err, roundMs(elapsed))
-		return
-	}
-	s.printf("%s %s → %d (%s)\n", timestamp(), label, status, roundMs(elapsed))
 }
 
 func (s *session) printf(format string, args ...any) {
@@ -270,7 +262,6 @@ func websocketURL(gatewayURL, source string) (string, error) {
 
 func timestamp() string { return time.Now().Format("15:04:05") }
 
-func roundMs(d time.Duration) string { return d.Round(time.Millisecond).String() }
 
 // jitter spreads reconnects over 50–100% of the backoff so a gateway restart
 // doesn't get every tunnel back at the same instant.
