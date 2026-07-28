@@ -80,11 +80,11 @@ func runLogin(cmd *cobra.Command, gatewayURL, apiKey string) error {
 		return err
 	}
 
-	fmt.Fprintf(out, "Logged in to %s\n", normalized)
-	fmt.Fprintf(out, "Credentials saved to %s\n", path)
-	fmt.Fprintf(out, "%s configured.\n", pluralize(len(sources), "source", "sources"))
+	_, _ = fmt.Fprintf(out, "Logged in to %s\n", normalized)
+	_, _ = fmt.Fprintf(out, "Credentials saved to %s\n", path)
+	_, _ = fmt.Fprintf(out, "%s configured.\n", pluralize(len(sources), "source", "sources"))
 	if len(sources) == 0 {
-		fmt.Fprintf(out, "\nNo sources yet — create one to start receiving webhooks.\n")
+		_, _ = fmt.Fprintf(out, "\nNo sources yet — create one to start receiving webhooks.\n")
 	}
 	return nil
 }
@@ -97,7 +97,7 @@ func promptURL(out io.Writer, reader *bufio.Reader) (string, error) {
 		fallback = existing.GatewayURL
 	}
 
-	fmt.Fprintf(out, "Gateway URL [%s]: ", fallback)
+	_, _ = fmt.Fprintf(out, "Gateway URL [%s]: ", fallback)
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
 		return "", fmt.Errorf("reading gateway URL: %w", err)
@@ -112,11 +112,11 @@ func promptURL(out io.Writer, reader *bufio.Reader) (string, error) {
 // attached to a real terminal, so the key never lands in scrollback or a screen
 // recording. Piped input reads normally — there is nothing to echo to.
 func promptAPIKey(out io.Writer, in io.Reader, reader *bufio.Reader) (string, error) {
-	fmt.Fprint(out, "API key: ")
+	_, _ = fmt.Fprint(out, "API key: ")
 
 	if in == os.Stdin && term.IsTerminal(int(os.Stdin.Fd())) {
 		secret, err := term.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 		if err != nil {
 			return "", fmt.Errorf("reading API key: %w", err)
 		}

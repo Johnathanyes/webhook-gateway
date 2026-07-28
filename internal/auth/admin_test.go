@@ -41,3 +41,27 @@ func TestAdminOnly(t *testing.T) {
 		})
 	}
 }
+
+// An empty password authenticates nobody. Comparing two empty strings in
+// constant time succeeds, so without the non-empty guard a bare "Bearer "
+// header would pass — on the middleware that protects API-key minting.
+func TestAdminOnlyRejectsEverythingWhenPasswordIsEmpty(t *testing.T) {
+	handler := auth.AdminOnly("", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("handler ran with no admin password configured")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	for _, header := range []string{"Bearer ", "Bearer", "Bearer anything", ""} {
+		t.Run("header="+header, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/api-keys", nil)
+			if header != "" {
+				req.Header.Set("Authorization", header)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", rec.Code)
+			}
+		})
+	}
+}

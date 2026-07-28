@@ -4,10 +4,10 @@
 # against a running stack: boot Postgres + the gateway, mint a scoped API key,
 # log the CLI in, start `whg listen` pointed at a local sink, then
 #
-#   26/28  send a Stripe-signed webhook and assert it comes back out on
+#     send a Stripe-signed webhook and assert it comes back out on
 #          localhost with its signature intact and the delivery succeeded
-#   30     `whg trigger` a signed sample event with no provider involved
-#   29     `whg replay` a stored event straight to localhost, byte-for-byte
+#     `whg trigger` a signed sample event with no provider involved
+#     `whg replay` a stored event straight to localhost, byte-for-byte
 #
 # and finally that detaching leaves no dangling tunnel destination.
 #
@@ -166,7 +166,10 @@ grep -q "tunnel ready" "${WORKDIR}/listen.log" \
 pass "whg listen attached"
 
 # --- send a validly Stripe-signed webhook to the gateway ---
-BODY='{"id":"evt_tunnel_e2e","type":"payment_intent.succeeded"}'
+# MARKER rides inside the payload so the log check at the end can prove no
+# payload content reached the gateway's or the CLI's log (task #38).
+MARKER="MARKERPAYLOAD_tunnel_must_never_be_logged_6b52"
+BODY="{\"id\":\"evt_tunnel_e2e\",\"type\":\"payment_intent.succeeded\",\"marker\":\"${MARKER}\"}"
 TS=$(date +%s)
 SIG=$(printf '%s' "${TS}.${BODY}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $NF}')
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/ingest/${SOURCE_PATH}" \
@@ -264,5 +267,21 @@ for _ in $(seq 1 40); do
 done
 [ "$LEFTOVER" = "0" ] || fail "${LEFTOVER} tunnel destination(s) left behind after disconnect"
 pass "disconnect cleaned up the ephemeral destination"
+
+# Neither the signing secret nor payload content may
+# appear in any log this run produced — the gateway's, or the CLI's, which
+# handled the same payload on its way to localhost.
+for logfile in "${WORKDIR}/gateway.log" "${WORKDIR}/listen.log"; do
+  [ -f "$logfile" ] || continue
+  if grep -q "$SECRET" "$logfile"; then
+    fail "signing secret found in $(basename "$logfile"):
+$(grep -n "$SECRET" "$logfile" | head -5)"
+  fi
+  if grep -q "$MARKER" "$logfile"; then
+    fail "payload content found in $(basename "$logfile"):
+$(grep -n "$MARKER" "$logfile" | head -5)"
+  fi
+done
+pass "no signing secret or payload content in the gateway or CLI logs"
 
 echo "==> PASS: tunnel end-to-end dev loop verified"

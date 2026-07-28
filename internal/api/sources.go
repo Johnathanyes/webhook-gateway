@@ -48,6 +48,37 @@ type createSourceRequest struct {
 	Name          string `json:"name"`
 	ProviderType  string `json:"provider_type"`
 	SigningSecret string `json:"signing_secret"`
+
+	DedupeEnabled       bool   `json:"dedupe_enabled"`
+	DedupeStrategy      string `json:"dedupe_strategy,omitempty"`
+	DedupeFieldPath     string `json:"dedupe_field_path,omitempty"`
+	DedupeWindowSeconds int32  `json:"dedupe_window_seconds,omitempty"`
+}
+
+// defaultDedupeWindowSeconds mirrors the sources.dedupe_window_seconds column
+// default, applied here so the API and the schema can't drift apart.
+const defaultDedupeWindowSeconds = 300
+
+// validateDedupe returns a client-facing message when the dedupe fields don't
+// form a usable configuration, mirroring the chk_dedupe_* table constraints so
+// a bad request is a 400 rather than a 500 from Postgres.
+func validateDedupe(req createSourceRequest) (string, bool) {
+	if !req.DedupeEnabled {
+		return "", true
+	}
+	switch req.DedupeStrategy {
+	case "exact":
+	case "field":
+		if req.DedupeFieldPath == "" {
+			return "dedupe_field_path is required when dedupe_strategy is \"field\"", false
+		}
+	default:
+		return "dedupe_strategy must be \"exact\" or \"field\" when dedupe_enabled is true", false
+	}
+	if req.DedupeWindowSeconds < 0 {
+		return "dedupe_window_seconds must be positive", false
+	}
+	return "", true
 }
 
 // sourceResponse is the API view of a source. It deliberately omits the
@@ -58,6 +89,11 @@ type sourceResponse struct {
 	ProviderType string    `json:"provider_type"`
 	EndpointPath string    `json:"endpoint_path"`
 	CreatedAt    time.Time `json:"created_at"`
+
+	DedupeEnabled       bool   `json:"dedupe_enabled"`
+	DedupeStrategy      string `json:"dedupe_strategy,omitempty"`
+	DedupeFieldPath     string `json:"dedupe_field_path,omitempty"`
+	DedupeWindowSeconds int32  `json:"dedupe_window_seconds,omitempty"`
 }
 
 func (h *sourcesHandler) create(w http.ResponseWriter, r *http.Request) {
@@ -85,6 +121,10 @@ func (h *sourcesHandler) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "signing_secret is required for this provider_type")
 		return
 	}
+	if message, ok := validateDedupe(req); !ok {
+		writeError(w, http.StatusBadRequest, message)
+		return
+	}
 
 	path, err := generateEndpointPath()
 	if err != nil {
@@ -108,6 +148,10 @@ func (h *sourcesHandler) create(w http.ResponseWriter, r *http.Request) {
 		keyVersion = pgtype.Int4{Int32: int32(version), Valid: true}
 	}
 
+	window := req.DedupeWindowSeconds
+	if window == 0 {
+		window = defaultDedupeWindowSeconds
+	}
 	src, err := h.q.InsertSource(r.Context(), db.InsertSourceParams{
 		TenantID:                tenancy.DefaultTenantID,
 		Name:                    req.Name,
@@ -116,6 +160,10 @@ func (h *sourcesHandler) create(w http.ResponseWriter, r *http.Request) {
 		SigningSecretEncrypted:  encrypted,
 		SigningSecretKeyVersion: keyVersion,
 		VerificationConfig:      []byte("{}"),
+		DedupeEnabled:           req.DedupeEnabled,
+		DedupeStrategy:          pgtype.Text{String: req.DedupeStrategy, Valid: req.DedupeEnabled},
+		DedupeFieldPath:         pgtype.Text{String: req.DedupeFieldPath, Valid: req.DedupeEnabled && req.DedupeFieldPath != ""},
+		DedupeWindowSeconds:     window,
 	})
 	if err != nil {
 		slog.Error("inserting source", "error", err)
@@ -214,13 +262,23 @@ func generateEndpointPath() (string, error) {
 }
 
 func toSourceResponse(s db.Source) sourceResponse {
-	return sourceResponse{
+	out := sourceResponse{
 		ID:           uuidString(s.ID),
 		Name:         s.Name,
 		ProviderType: s.ProviderType,
 		EndpointPath: s.EndpointPath,
 		CreatedAt:    s.CreatedAt.Time,
+
+		DedupeEnabled:   s.DedupeEnabled,
+		DedupeStrategy:  s.DedupeStrategy.String,
+		DedupeFieldPath: s.DedupeFieldPath.String,
 	}
+	// The window is only meaningful when dedupe is on, and omitempty would drop
+	// a legitimate 0 anyway — so report it only for sources that use it.
+	if s.DedupeEnabled {
+		out.DedupeWindowSeconds = s.DedupeWindowSeconds
+	}
+	return out
 }
 
 // uuidString renders a pgtype.UUID in canonical 8-4-4-4-12 form.

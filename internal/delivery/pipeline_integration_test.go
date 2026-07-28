@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -358,6 +359,113 @@ func TestPipelineFanOutAndAtLeastOnce(t *testing.T) {
 	total := destA.count() + destB.count()
 	if total != 2 {
 		t.Errorf("after redelivery, total destination calls = %d, want 2 (no re-POST)", total)
+	}
+}
+
+func TestPipelineTwoWorkersDeliverEachEventOnce(t *testing.T) {
+	h := newHarness(t)
+	// Two independent River clients on the same pool, exactly as two gateway
+	// processes with ROLE=worker would be.
+	h.startWorker(t)
+	h.startWorker(t)
+
+	dest := newRecordingServer(t, alwaysStatus(200))
+	src := h.createSource(t)
+	d := h.createDestination(t, dest.srv.URL, destOpts{})
+	h.route(t, src, d)
+
+	const n = 12
+	eventIDs := make([]pgtype.UUID, 0, n)
+	for i := range n {
+		eventIDs = append(eventIDs, h.postEvent(t, src, fmt.Sprintf(`{"seq":%d}`, i)))
+	}
+
+	eventually(t, 30*time.Second, "every event is delivered", func() bool {
+		for _, id := range eventIDs {
+			ds := deliveriesForEvent(t, h.pool, id)
+			if len(ds) != 1 || ds[0].status != statusSucceeded {
+				return false
+			}
+		}
+		return true
+	})
+
+	// Settle, so a late duplicate POST from the losing worker would still be
+	// counted rather than racing the assertion.
+	time.Sleep(2 * time.Second)
+
+	if got := dest.count(); got != n {
+		t.Errorf("destination calls = %d, want exactly %d — two workers double-delivered or dropped one", got, n)
+	}
+	for _, id := range eventIDs {
+		if got := deliveriesForEvent(t, h.pool, id)[0].attemptCount; got != 1 {
+			t.Errorf("delivery for event %s has attempt_count = %d, want 1", uuidStr(id), got)
+		}
+	}
+}
+
+func TestPipelineRetryPolicyIsPerDestination(t *testing.T) {
+	h := newHarness(t)
+	h.startWorker(t)
+
+	impatient := newRecordingServer(t, alwaysStatus(503))
+	patient := newRecordingServer(t, alwaysStatus(503))
+
+	src := h.createSource(t)
+	impatientDest := h.createDestination(t, impatient.srv.URL, destOpts{maxAttempts: 2})
+	patientDest := h.createDestination(t, patient.srv.URL, destOpts{maxAttempts: 4})
+	h.route(t, src, impatientDest)
+	h.route(t, src, patientDest)
+
+	eventID := h.postEvent(t, src, `{"hello":"per-destination"}`)
+
+	// byDestination indexes this event's deliveries so each can be asserted
+	// against its own destination's policy. deliveriesForEvent doesn't carry
+	// destination_id, and the twelve tests using it don't need it.
+	byDestination := func() map[string]deliveryRow {
+		rows, err := h.pool.Query(context.Background(),
+			"SELECT destination_id, status, attempt_count FROM deliveries WHERE event_id = $1", eventID)
+		if err != nil {
+			t.Fatalf("query deliveries: %v", err)
+		}
+		defer rows.Close()
+
+		out := make(map[string]deliveryRow)
+		for rows.Next() {
+			var destID pgtype.UUID
+			var d deliveryRow
+			if err := rows.Scan(&destID, &d.status, &d.attemptCount); err != nil {
+				t.Fatalf("scan delivery: %v", err)
+			}
+			out[uuidStr(destID)] = d
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate deliveries: %v", err)
+		}
+		return out
+	}
+
+	eventually(t, 40*time.Second, "both deliveries dead-letter on their own budgets", func() bool {
+		ds := byDestination()
+		if len(ds) != 2 {
+			return false
+		}
+		return ds[uuidStr(impatientDest.ID)].status == statusDeadLettered &&
+			ds[uuidStr(patientDest.ID)].status == statusDeadLettered
+	})
+
+	ds := byDestination()
+	if got := ds[uuidStr(impatientDest.ID)].attemptCount; got != 2 {
+		t.Errorf("impatient destination attempt_count = %d, want 2 (its own max_attempts)", got)
+	}
+	if got := ds[uuidStr(patientDest.ID)].attemptCount; got != 4 {
+		t.Errorf("patient destination attempt_count = %d, want 4 (its own max_attempts)", got)
+	}
+	if impatient.count() != 2 {
+		t.Errorf("impatient destination was called %d times, want 2", impatient.count())
+	}
+	if patient.count() != 4 {
+		t.Errorf("patient destination was called %d times, want 4", patient.count())
 	}
 }
 

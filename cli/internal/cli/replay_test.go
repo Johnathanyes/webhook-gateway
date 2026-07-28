@@ -55,10 +55,10 @@ func TestReplayByEventID(t *testing.T) {
 
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.URL.Path == "/api/sources":
+		switch r.URL.Path {
+		case "/api/sources":
 			_, _ = w.Write([]byte(sourcesJSON))
-		case r.URL.Path == "/api/events/evt-abc":
+		case "/api/events/evt-abc":
 			_, _ = w.Write([]byte(eventJSON("evt-abc", body)))
 		default:
 			w.WriteHeader(http.StatusNotFound)

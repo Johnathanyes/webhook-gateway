@@ -75,7 +75,7 @@ func Listen(ctx context.Context, opts Options) error {
 			backoff = minBackoff
 		}
 
-		fmt.Fprintf(opts.Out, "%s connection lost (%v) — reconnecting in %s\n",
+		_, _ = fmt.Fprintf(opts.Out, "%s connection lost (%v) — reconnecting in %s\n",
 			timestamp(), err, backoff.Round(time.Second))
 		select {
 		case <-ctx.Done():
@@ -213,7 +213,7 @@ func (s *session) printReady(frame ReadyFrame) {
 func (s *session) printf(format string, args ...any) {
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
-	fmt.Fprintf(s.opts.Out, format, args...)
+	_, _ = fmt.Fprintf(s.opts.Out, format, args...)
 }
 
 // dialError turns a failed upgrade into advice. A 4xx means the request itself

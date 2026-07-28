@@ -17,7 +17,8 @@ func AdminOnly(password string, h http.Handler) http.Handler {
 		const prefix = "Bearer "
 		header := r.Header.Get("Authorization")
 		token := strings.TrimPrefix(header, prefix)
-		if !strings.HasPrefix(header, prefix) ||
+		
+		if !strings.HasPrefix(header, prefix) || password == "" ||
 			subtle.ConstantTimeCompare([]byte(token), []byte(password)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="admin"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

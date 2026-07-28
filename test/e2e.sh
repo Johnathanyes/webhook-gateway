@@ -63,7 +63,10 @@ SOURCE_PATH=$(printf '%s' "$CREATE_RESP" | sed -n 's/.*"endpoint_path":"\([^"]*\
 pass "source created: ${SOURCE_PATH}"
 
 # --- send a validly Stripe-signed webhook ---
-BODY='{"id":"evt_e2e","object":"event"}'
+# MARKER rides inside the payload so the log check at the end can prove no
+# payload content reached the gateway's log (task #38).
+MARKER="MARKERPAYLOAD_e2e_must_never_be_logged_4d81"
+BODY="{\"id\":\"evt_e2e\",\"object\":\"event\",\"marker\":\"${MARKER}\"}"
 TS=$(date +%s)
 SIG=$(printf '%s' "${TS}.${BODY}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $NF}')
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${BASE}/ingest/${SOURCE_PATH}" \
@@ -91,5 +94,18 @@ VERIFIED=$(psql_q "SELECT verified FROM events
   ORDER BY received_at DESC LIMIT 1")
 [ "$VERIFIED" = "f" ] || fail "tampered event stored with verified=${VERIFIED}, want f"
 pass "tampered event stored verified=false"
+
+# Neither the signing secret nor payload content may
+# appear in the gateway's log, on any path including the failed verification
+# above.
+if grep -q "$SECRET" /tmp/gateway-e2e.log; then
+  fail "signing secret found in the gateway log:
+$(grep -n "$SECRET" /tmp/gateway-e2e.log | head -5)"
+fi
+if grep -q "$MARKER" /tmp/gateway-e2e.log; then
+  fail "payload content found in the gateway log:
+$(grep -n "$MARKER" /tmp/gateway-e2e.log | head -5)"
+fi
+pass "no signing secret or payload content in the gateway log"
 
 echo "==> PASS: Phase 1 end-to-end pipeline verified"

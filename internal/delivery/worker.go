@@ -15,6 +15,7 @@ import (
 
 	"webhook-gateway/internal/alerting"
 	"webhook-gateway/internal/db"
+	"webhook-gateway/internal/ingest"
 	"webhook-gateway/internal/observability"
 	"webhook-gateway/internal/queue"
 	"webhook-gateway/internal/tunnel"
@@ -204,11 +205,19 @@ func NewClient(pool *pgxpool.Pool, q *db.Queries, tunnels *tunnel.Registry) (*ri
 	river.AddWorker(workers, NewWorker(pool, q, tunnels))
 	river.AddWorker(workers, NewReplayWorker(pool, q))
 	river.AddWorker(workers, alerting.NewCheckWorker(q))
+	river.AddWorker(workers, ingest.NewCleanupWorker(q))
 
 	periodic := []*river.PeriodicJob{
 		river.NewPeriodicJob(
 			river.PeriodicInterval(time.Minute),
 			func() (river.JobArgs, *river.InsertOpts) { return queue.AlertCheckArgs{}, nil },
+			&river.PeriodicJobOpts{},
+		),
+		// Five minutes matches the default dedupe window: pruning much more
+		// often would mostly scan rows that are still live.
+		river.NewPeriodicJob(
+			river.PeriodicInterval(5*time.Minute),
+			func() (river.JobArgs, *river.InsertOpts) { return queue.DedupCleanupArgs{}, nil },
 			&river.PeriodicJobOpts{},
 		),
 	}

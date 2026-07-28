@@ -4,7 +4,7 @@ info:
   version: "1.0.0"
   description: |
     The webhook gateway's HTTP API — the full surface behind the CLI and the
-    dashboard SPA (BR-24: "everything the UI does"). This spec is handwritten
+    dashboard SPA. This spec is handwritten
     and is the source of truth for the Phase 7 docs-site API reference.
 
     ## Authentication
@@ -107,6 +107,30 @@ paths:
                 signing_secret:
                   type: string
                   description: Required unless provider_type is "none". Stored encrypted; never returned.
+                dedupe_enabled:
+                  type: boolean
+                  default: false
+                  description: >
+                    Suppress duplicate events within a window. A duplicate is
+                    still stored, with dropped_reason "duplicate", but fans out to no
+                    destination.
+                dedupe_strategy:
+                  type: string
+                  enum: [exact, field]
+                  description: >
+                    Required when dedupe_enabled. "exact" keys on the verbatim request
+                    body; "field" keys on a value inside it.
+                dedupe_field_path:
+                  type: string
+                  example: "$.id"
+                  description: >
+                    Required when dedupe_strategy is "field". A dotted path to a scalar,
+                    e.g. "$.id" or "$.data.object.id". Array indexing is not supported.
+                    An event whose path yields no scalar is delivered rather than dropped.
+                dedupe_window_seconds:
+                  type: integer
+                  default: 300
+                  description: How long a key stays claimed before an identical event is treated as new.
       responses:
         "201":
           description: Created
@@ -125,7 +149,7 @@ paths:
         Signs the provider's catalog sample_payload with the source's real
         (decrypted) secret and runs it through the actual ingest path — a
         test event exercises verification and rule evaluation rather than
-        bypassing them (BR-22).
+        bypassing them.
       security: [{ bearerAuth: [write] }]
       parameters:
         - $ref: "#/components/parameters/IdPath"
@@ -435,7 +459,7 @@ paths:
   /api/events/{id}/trace:
     get:
       tags: [events]
-      summary: Per-event delivery trace (BR-17)
+      summary: Per-event delivery trace
       description: received → verified → queued → per-delivery attempt timeline → outcome.
       security: [{ bearerAuth: [read] }]
       parameters:
@@ -506,7 +530,7 @@ paths:
     post:
       tags: [deliveries]
       summary: Recover a dead-lettered delivery
-      description: Re-enqueues a delivery that exhausted its retries (BR-09).
+      description: Re-enqueues a delivery that exhausted its retries.
       security: [{ bearerAuth: [replay] }]
       parameters:
         - $ref: "#/components/parameters/IdPath"
@@ -698,6 +722,10 @@ components:
         provider_type: { type: string }
         endpoint_path: { type: string, description: The path segment providers POST webhooks to. }
         created_at: { type: string, format: date-time }
+        dedupe_enabled: { type: boolean }
+        dedupe_strategy: { type: string, enum: [exact, field] }
+        dedupe_field_path: { type: string }
+        dedupe_window_seconds: { type: integer, description: Present only when dedupe_enabled. }
 
     TestEventResult:
       type: object

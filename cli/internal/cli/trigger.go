@@ -49,12 +49,12 @@ func runTrigger(cmd *cobra.Command, source string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Triggered a %s sample event through %s\n", found.ProviderType, found.Name)
-	fmt.Fprintf(out, "Event %s stored (verified: %t)\n", result.EventID, result.Verified)
+	_, _ = fmt.Fprintf(out, "Triggered a %s sample event through %s\n", found.ProviderType, found.Name)
+	_, _ = fmt.Fprintf(out, "Event %s stored (verified: %t)\n", result.EventID, result.Verified)
 	if !result.Verified {
 		// The gateway signs with the source's stored secret, so a failure here
 		// means that secret can't produce a signature its own verifier accepts.
-		fmt.Fprintf(out, "\nThe sample failed verification — check this source's signing secret.\n")
+		_, _ = fmt.Fprintf(out, "\nThe sample failed verification — check this source's signing secret.\n")
 	}
 	return nil
 }

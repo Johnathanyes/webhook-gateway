@@ -21,7 +21,7 @@ type GetSourceParams struct {
 	TenantID pgtype.UUID `json:"tenant_id"`
 }
 
-// The test-event generator (#25) and other admin lookups fetch a source by
+// The test-event generator and other admin lookups fetch a source by
 // id, scoped to the tenant like every other admin-authed query.
 func (q *Queries) GetSource(ctx context.Context, arg GetSourceParams) (Source, error) {
 	row := q.db.QueryRow(ctx, getSource, arg.ID, arg.TenantID)
@@ -88,9 +88,6 @@ type GetSourceByNameParams struct {
 	Name     string      `json:"name"`
 }
 
-// The tunnel endpoint and the CLI address sources by name, since a
-// developer types `--source stripe`, not a UUID. Source names are not unique,
-// so the oldest match wins deterministically rather than at random.
 func (q *Queries) GetSourceByName(ctx context.Context, arg GetSourceByNameParams) (Source, error) {
 	row := q.db.QueryRow(ctx, getSourceByName, arg.TenantID, arg.Name)
 	var i Source
@@ -122,9 +119,13 @@ INSERT INTO sources (
     endpoint_path,
     signing_secret_encrypted,
     signing_secret_key_version,
-    verification_config
+    verification_config,
+    dedupe_enabled,
+    dedupe_strategy,
+    dedupe_field_path,
+    dedupe_window_seconds
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
 RETURNING id, tenant_id, name, provider_type, endpoint_path, signing_secret_encrypted, signing_secret_key_version, verification_config, dedupe_enabled, dedupe_strategy, dedupe_field_path, dedupe_window_seconds, paused_at, created_at, updated_at
 `
@@ -137,6 +138,10 @@ type InsertSourceParams struct {
 	SigningSecretEncrypted  []byte      `json:"signing_secret_encrypted"`
 	SigningSecretKeyVersion pgtype.Int4 `json:"signing_secret_key_version"`
 	VerificationConfig      []byte      `json:"verification_config"`
+	DedupeEnabled           bool        `json:"dedupe_enabled"`
+	DedupeStrategy          pgtype.Text `json:"dedupe_strategy"`
+	DedupeFieldPath         pgtype.Text `json:"dedupe_field_path"`
+	DedupeWindowSeconds     int32       `json:"dedupe_window_seconds"`
 }
 
 func (q *Queries) InsertSource(ctx context.Context, arg InsertSourceParams) (Source, error) {
@@ -148,6 +153,10 @@ func (q *Queries) InsertSource(ctx context.Context, arg InsertSourceParams) (Sou
 		arg.SigningSecretEncrypted,
 		arg.SigningSecretKeyVersion,
 		arg.VerificationConfig,
+		arg.DedupeEnabled,
+		arg.DedupeStrategy,
+		arg.DedupeFieldPath,
+		arg.DedupeWindowSeconds,
 	)
 	var i Source
 	err := row.Scan(

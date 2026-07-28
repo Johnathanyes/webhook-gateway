@@ -58,10 +58,9 @@ func (a *Auth) RequireScope(scope string, h http.Handler) http.Handler {
 		}
 		token := strings.TrimPrefix(header, prefix)
 
-		// Anything not key-shaped is compared against the admin password in
-		// constant time, exactly like auth.AdminOnly always has.
 		if !auth.LooksLikeAPIKey(token) {
-			if subtle.ConstantTimeCompare([]byte(token), []byte(a.adminPassword)) == 1 {
+			if a.adminPassword != "" &&
+				subtle.ConstantTimeCompare([]byte(token), []byte(a.adminPassword)) == 1 {
 				h.ServeHTTP(w, r)
 				return
 			}

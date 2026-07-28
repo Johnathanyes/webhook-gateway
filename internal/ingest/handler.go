@@ -127,6 +127,10 @@ func (h *Handler) ProcessEvent(ctx context.Context, source db.Source, body []byt
 
 	contentType := headers.Get("Content-Type")
 
+	// Derived before the insert so the key is stored on the event itself, which
+	// is what makes "why was this dropped?" answerable from the event log.
+	dedupeKeyValue, deduped := dedupeKey(source, body, parsedBody)
+
 	tx, err := h.pool.Begin(ctx)
 	if err != nil {
 		return db.InsertEventRow{}, false, fmt.Errorf("beginning transaction: %w", err)
@@ -143,11 +147,44 @@ func (h *Handler) ProcessEvent(ctx context.Context, source db.Source, body []byt
 		RawBody:     body,
 		ContentType: pgtype.Text{String: contentType, Valid: contentType != ""},
 		ParsedBody:  parsedBody,
-		DedupeKey:   pgtype.Text{},
+		DedupeKey:   pgtype.Text{String: dedupeKeyValue, Valid: deduped},
 		Verified:    verified,
 	})
 	if err != nil {
 		return db.InsertEventRow{}, false, fmt.Errorf("inserting event: %w", err)
+	}
+
+	// Claim the key in the event's own transaction, so two
+	// identical events arriving at once cannot both fan out — the loser
+	// serializes on the primary key and comes back empty. A duplicate is still
+	// stored, with dropped_reason set, because "we already had this one" is an
+	// answer the event log should be able to give.
+	if deduped {
+		window := source.DedupeWindowSeconds
+		if window <= 0 {
+			window = defaultDedupeWindowSeconds
+		}
+		_, err := qtx.ClaimDedupeKey(ctx, db.ClaimDedupeKeyParams{
+			SourceID:      source.ID,
+			DedupeKey:     dedupeKeyValue,
+			EventID:       event.ID,
+			WindowSeconds: window,
+		})
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			if err := qtx.MarkEventDropped(ctx, db.MarkEventDroppedParams{
+				ID:            event.ID,
+				DroppedReason: pgtype.Text{String: droppedReasonDuplicate, Valid: true},
+			}); err != nil {
+				return db.InsertEventRow{}, false, fmt.Errorf("marking duplicate event: %w", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return db.InsertEventRow{}, false, fmt.Errorf("committing duplicate event: %w", err)
+			}
+			return event, verified, nil
+		case err != nil:
+			return db.InsertEventRow{}, false, fmt.Errorf("claiming dedupe key: %w", err)
+		}
 	}
 
 	// Rules (BR-14): the first matching enabled rule may drop the event or

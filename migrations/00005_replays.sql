@@ -1,10 +1,9 @@
 -- +goose Up
 
--- Tracks bulk replay operations (BR-18: "bulk replay by filter"). Single-
+-- Tracks bulk replay operations. Single-
 -- event replay doesn't need a row here — it just creates a new delivery +
--- River job directly. This table exists so a bulk replay (which can touch
--- thousands of deliveries) is itself observable and auditable: who ran it,
--- what filter, how many matched, how many actually got requeued.
+-- River job directly. This table exists so a bulk replay is itself observable 
+-- and auditable: who ran it, what filter, how many matched, how many actually got requeued.
 CREATE TABLE replays (
     id                UUID PRIMARY KEY DEFAULT uuidv7(),
     tenant_id         UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

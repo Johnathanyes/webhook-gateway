@@ -150,6 +150,12 @@ type AlertCheckArgs struct{}
 // Kind is the stable job type name persisted in river_job.kind.
 func (AlertCheckArgs) Kind() string { return "alert_check" }
 
+// DedupCleanupArgs drives the periodic prune of expired dedup_index rows
+type DedupCleanupArgs struct{}
+
+// Kind is the stable job type name persisted in river_job.kind.
+func (DedupCleanupArgs) Kind() string { return "dedup_cleanup" }
+
 // uuidString renders a pgtype.UUID in canonical 8-4-4-4-12 form for the
 // delivery-job args.
 func uuidString(u pgtype.UUID) string {

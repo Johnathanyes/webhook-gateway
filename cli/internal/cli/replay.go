@@ -72,7 +72,7 @@ func runReplay(cmd *cobra.Command, eventID, source, forwardTo string, last int) 
 		return err
 	}
 	if len(ids) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No matching events to replay.")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "No matching events to replay.")
 		return nil
 	}
 
@@ -87,7 +87,7 @@ func runReplay(cmd *cobra.Command, eventID, source, forwardTo string, last int) 
 	for _, id := range ids {
 		if err := replayOne(ctx, api, httpClient, cmd.OutOrStdout(), names, id, target); err != nil {
 			failures++
-			fmt.Fprintf(cmd.OutOrStdout(), "%s\n", err)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%s\n", err)
 		}
 	}
 	if failures > 0 {
@@ -116,7 +116,7 @@ func replayOne(ctx context.Context, api *client.Client, httpClient *http.Client,
 		// No Webhook-Id: this is a local replay, not a gateway delivery, so
 		// there is no delivery id to name.
 	})
-	fmt.Fprintf(out, "%s\n", forward.Line(label, forward.EventType(event.RawHeaders, event.RawBody), res, postErr))
+	_, _ = fmt.Fprintf(out, "%s\n", forward.Line(label, forward.EventType(event.RawHeaders, event.RawBody), res, postErr))
 	if postErr != nil {
 		return fmt.Errorf("replaying %s: %w", shortID(id), postErr)
 	}

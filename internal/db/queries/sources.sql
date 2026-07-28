@@ -29,8 +29,12 @@ INSERT INTO sources (
     endpoint_path,
     signing_secret_encrypted,
     signing_secret_key_version,
-    verification_config
+    verification_config,
+    dedupe_enabled,
+    dedupe_strategy,
+    dedupe_field_path,
+    dedupe_window_seconds
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
 RETURNING *;
