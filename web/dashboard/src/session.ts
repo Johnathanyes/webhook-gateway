@@ -1,11 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiFetch, UnauthorizedError } from "../lib/api";
+import { apiFetch, UnauthorizedError } from "@/lib/api";
 
 export const sessionKey = ["session"] as const;
 
-// Whether the browser holds a valid session cookie. The cookie itself is
-// HttpOnly, so asking the server is the only way to know.
 export function useSession() {
   return useQuery({
     queryKey: sessionKey,

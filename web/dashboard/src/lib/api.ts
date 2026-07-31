@@ -1,8 +1,10 @@
 // Thrown for any 401. The query cache turns it into "show the login page"
 // (see main.tsx), so no individual caller has to handle session expiry.
 export class UnauthorizedError extends Error {
-  constructor() {
-    super("unauthorized");
+  // Carries the server's message so the login form can say "invalid password"
+  // rather than a generic "unauthorized".
+  constructor(message = "unauthorized") {
+    super(message);
     this.name = "UnauthorizedError";
   }
 }
@@ -16,10 +18,10 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
 
-  if (res.status === 401) throw new UnauthorizedError();
   if (!res.ok) {
     // Every handler answers errors with {"error": "..."}.
     const body = (await res.json().catch(() => null)) as { error?: string } | null;
+    if (res.status === 401) throw new UnauthorizedError(body?.error);
     throw new Error(body?.error ?? `request failed with ${res.status}`);
   }
   if (res.status === 204) return undefined as T;

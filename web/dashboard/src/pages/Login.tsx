@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 
-import { useLogin } from "../session";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useLogin } from "@/session";
 
 type LocationState = { from?: string } | null;
 
@@ -15,28 +19,44 @@ export default function Login() {
   const from = (location.state as LocationState)?.from ?? "/";
 
   return (
-    <main>
-      <h1>Webhook Gateway</h1>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          login.mutate(password, { onSuccess: () => navigate(from, { replace: true }) });
-        }}
-      >
-        <label htmlFor="password">Admin password</label>
-        <input
-          id="password"
-          type="password"
-          autoFocus
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        <button type="submit" disabled={login.isPending || password === ""}>
-          {login.isPending ? "Signing in…" : "Sign in"}
-        </button>
-        {login.isError && <p role="alert">{login.error.message}</p>}
-      </form>
-    </main>
+    <div className="flex min-h-screen items-center justify-center p-4">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <CardTitle>Webhook Gateway</CardTitle>
+          <CardDescription>Sign in with the admin password.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="space-y-4"
+            onSubmit={(e) => {
+              e.preventDefault();
+              login.mutate(password, { onSuccess: () => navigate(from, { replace: true }) });
+            }}
+          >
+            <div className="space-y-1.5">
+              <Label htmlFor="password">Admin password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+
+            {login.isError && (
+              <p role="alert" className="text-sm text-destructive">
+                {login.error.message}
+              </p>
+            )}
+
+            <Button type="submit" className="w-full" disabled={login.isPending || password === ""}>
+              {login.isPending ? "Signing in…" : "Sign in"}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
   );
 }

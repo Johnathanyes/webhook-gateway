@@ -147,6 +147,25 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
 
+  /api/providers:
+    get:
+      tags: [sources]
+      summary: List available source providers
+      description: |
+        The source-definition catalog — every provider a source can be created
+        with, plus the built-in `none`. Read-only; the catalog is compiled into
+        the binary from `internal/sourcedef/catalog/*.yaml`.
+      security: [{ bearerAuth: [read] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Provider" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /api/sources/{id}/test-event:
     post:
       tags: [sources]
@@ -802,6 +821,15 @@ components:
         dedupe_strategy: { type: string, enum: [exact, field] }
         dedupe_field_path: { type: string }
         dedupe_window_seconds: { type: integer, description: Present only when dedupe_enabled. }
+
+    Provider:
+      type: object
+      properties:
+        slug: { type: string, description: The value to send as provider_type. }
+        name: { type: string }
+        description: { type: string }
+        verification_type: { type: string, enum: [hmac, api_key, basic_auth, none] }
+        requires_secret: { type: boolean, description: Whether creating a source with this provider requires signing_secret. }
 
     TestEventResult:
       type: object

@@ -20,7 +20,13 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
-    "noFallthroughCasesInSwitch": true
+    "noFallthroughCasesInSwitch": true,
+
+    /* The "@/..." alias shadcn/ui generates its imports against. Mirrored in
+       vite.config.ts, which is what actually resolves them at build time.
+       No baseUrl: paths resolve relative to this file, and baseUrl is on its
+       way out in TS 7. */
+    "paths": { "@/*": ["./src/*"] }
   },
-  "include": ["src", "lib/api.ts"]
+  "include": ["src"]
 }

@@ -107,6 +107,7 @@ func run() error {
 			RateLimitPerSecond: cfg.IngestRateLimitPerSecond,
 		})
 		api.RegisterSources(mux, q, enc, catalog, authz, ingestHandler)
+		api.RegisterProviders(mux, catalog, authz)
 		slog.Info("ingest and sources API mounted")
 	}
 
