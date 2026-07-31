@@ -9,8 +9,8 @@ export ADMIN_PASSWORD ?= dev-password
 export ENCRYPTION_KEY ?= $(shell printf 'dev-32-byte-encryption-key-00000' | base64)
 export LOG_FORMAT ?= text
 
-.PHONY: db-up db-down db-reset run build tidy test test-integration e2e \
-        cli-build cli-test e2e-tunnel
+.PHONY: db-up db-down db-reset run build build-go web web-dev tidy test \
+        test-integration e2e cli-build cli-test e2e-tunnel
 
 # Start dependencies and block until Postgres is accepting connections.
 db-up:
@@ -24,12 +24,24 @@ db-down:
 db-reset:
 	docker compose down -v
 
-# Boot the gateway on the host against the dockerized Postgres.
+# Boot the gateway on the host against the dockerized Postgres. The binary
+# serves whatever SPA `make web` last built; run that first to see the UI.
 run:
 	go run ./cmd/gateway
 
-build:
+build: web
 	go build ./...
+
+build-go:
+	go build ./...
+
+web:
+	cd web/dashboard && pnpm install --frozen-lockfile && pnpm run build
+
+# Vite dev server on :5173 with hot reload, proxying /api and /ingest to a
+# gateway running on :8080 (see vite.config.ts). Run `make run` alongside it.
+web-dev:
+	cd web/dashboard && pnpm run dev
 
 tidy:
 	go mod tidy

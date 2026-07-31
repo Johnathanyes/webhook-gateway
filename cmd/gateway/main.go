@@ -24,6 +24,7 @@ import (
 	"webhook-gateway/internal/sourcedef"
 	"webhook-gateway/internal/tunnel"
 	"webhook-gateway/internal/api/middleware"
+	"webhook-gateway/web/dashboard"
 )
 
 func main() {
@@ -129,7 +130,11 @@ func run() error {
 		if err := tunnel.Register(ctx, mux, q, authz, tunnels); err != nil {
 			return err
 		}
+		// Last, and on "/" so it is the fallback for everything the patterns
+		// above did not claim: the SPA owns its own client-side routes.
+		mux.Handle("GET /", dashboard.Handler())
 		slog.Info("destinations, routes, rules, deliveries, events, replay, api-keys, and tunnel API mounted")
+		slog.Info("dashboard SPA mounted at /")
 	}
 
 	if cfg.Role == "all" || cfg.Role == "worker" {

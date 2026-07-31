@@ -1,0 +1,6 @@
+node_modules/
+
+# Build output is produced by `make web`, never committed — but dist/ itself
+# must exist for the go:embed in embed.go to compile, so .gitkeep stays.
+dist/*
+!dist/.gitkeep

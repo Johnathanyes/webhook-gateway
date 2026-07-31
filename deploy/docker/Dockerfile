@@ -6,6 +6,19 @@
 #
 # (deploy/docker/docker-compose.yml already does this for you.)
 
+# --- dashboard -----------------------------------------------------------
+# The SPA is go:embed'ed into the binary, so it has to be built before Go is.
+FROM node:24-alpine AS web
+WORKDIR /web
+RUN corepack enable
+
+# Manifests first: a source-only change reuses the install layer.
+COPY web/dashboard/package.json web/dashboard/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY web/dashboard/ ./
+RUN pnpm run build
+
 # --- build ---------------------------------------------------------------
 FROM golang:1.26-alpine AS build
 WORKDIR /src
@@ -16,9 +29,13 @@ RUN go mod download
 
 COPY . .
 
-# CGO off produces a static binary — pgx is pure Go, and both the migrations
-# and the provider catalog are go:embed'ed, so the runtime image needs no
-# files besides the binary itself. -buildvcs=false because .dockerignore
+# Over the top of the .gitkeep placeholder that ships in the repo, so the
+# image never carries the "dashboard not built" page.
+COPY --from=web /web/dist ./web/dashboard/dist
+
+# CGO off produces a static binary — pgx is pure Go, and the migrations, the
+# provider catalog and the dashboard are all go:embed'ed, so the runtime image
+# needs no files besides the binary itself. -buildvcs=false because .dockerignore
 # keeps .git out of the context.
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -trimpath -buildvcs=false -ldflags="-s -w" \

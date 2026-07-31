@@ -90,6 +90,27 @@ jobs:
       - name: Test
         run: go test -race ./...
 
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/dashboard/pnpm-lock.yaml
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and build
+        run: pnpm run build
+
   # The done-tests: real HTTP through a real gateway process. Both scripts
   # bring up their own compose Postgres, so no service container here.
   e2e:
