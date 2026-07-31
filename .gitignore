@@ -3,3 +3,4 @@ SECURITY.md
 graphify-out
 cli/bin/
 deploy/docker/.env
+.DS_Store
