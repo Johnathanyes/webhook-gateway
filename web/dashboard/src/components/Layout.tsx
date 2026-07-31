@@ -5,6 +5,7 @@ import { useLogout } from "@/session";
 import { cn } from "@/lib/utils";
 
 const nav = [
+  { to: "/events", label: "Events" },
   { to: "/sources", label: "Sources" },
   { to: "/destinations", label: "Destinations" },
   { to: "/routes", label: "Routes" },

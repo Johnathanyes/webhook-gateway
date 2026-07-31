@@ -4,6 +4,8 @@ import { Navigate, Route, Routes, useLocation } from "react-router";
 import ApiKeys from "@/pages/ApiKeys";
 import Layout from "@/components/Layout";
 import Destinations from "@/pages/Destinations";
+import EventDetail from "@/pages/EventDetail";
+import Events from "@/pages/Events";
 import Login from "@/pages/Login";
 import RoutesPage from "@/pages/Routes";
 import Rules from "@/pages/Rules";
@@ -30,7 +32,9 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<Navigate to="/sources" replace />} />
+        <Route path="/" element={<Navigate to="/events" replace />} />
+        <Route path="/events" element={<Events />} />
+        <Route path="/events/:id" element={<EventDetail />} />
         <Route path="/sources" element={<Sources />} />
         <Route path="/destinations" element={<Destinations />} />
         <Route path="/routes" element={<RoutesPage />} />
