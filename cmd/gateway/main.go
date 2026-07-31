@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"webhook-gateway/internal/api"
+	"webhook-gateway/internal/auth"
 	"webhook-gateway/internal/config"
 	"webhook-gateway/internal/crypto"
 	"webhook-gateway/internal/db"
@@ -68,10 +69,9 @@ func run() error {
 	}
 	slog.Info("migrations applied")
 
-	// One registry per process, shared by the tunnel endpoint that accepts
-	// sockets and the delivery worker that pushes events into them. Tunnel
-	// delivery therefore only works when both run here — i.e. role "all".
 	tunnels := tunnel.NewRegistry()
+	
+	sessions := auth.NewSessions(cfg.EncryptionKey, cfg.AdminPassword, cfg.SessionCookieSecure)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", observability.Health)
@@ -93,6 +93,7 @@ func run() error {
 		}
 		q := db.New(pool)
 		authz := middleware.NewAuth(q, cfg.AdminPassword)
+		authz.AcceptSessions(sessions)
 
 		// Insert-only River client: ingest enqueues delivery jobs in the event's
 		// tx but never works them
@@ -112,6 +113,7 @@ func run() error {
 	if cfg.Role == "all" || cfg.Role == "dashboard" {
 		q := db.New(pool)
 		authz := middleware.NewAuth(q, cfg.AdminPassword)
+		authz.AcceptSessions(sessions)
 		// The recover endpoint re-enqueues delivery jobs, so the dashboard role
 		// needs its own insert-only River client.
 		insertClient, err := queue.NewInsertOnlyClient(pool)
@@ -126,7 +128,8 @@ func run() error {
 		api.RegisterReplay(mux, pool, q, insertClient, authz)
 		// Key management deliberately stays on the admin password alone —
 		// an API key must never be able to mint or revoke keys.
-		api.RegisterAPIKeys(mux, q, cfg.AdminPassword)
+		api.RegisterAPIKeys(mux, q, cfg.AdminPassword, sessions)
+		api.RegisterAuth(mux, sessions, cfg.AdminPassword)
 		if err := tunnel.Register(ctx, mux, q, authz, tunnels); err != nil {
 			return err
 		}

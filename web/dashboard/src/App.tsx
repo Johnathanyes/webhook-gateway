@@ -1,30 +1,28 @@
-import { useQuery } from "@tanstack/react-query";
-import { Route, Routes } from "react-router";
+import type { ReactNode } from "react";
+import { Navigate, Route, Routes, useLocation } from "react-router";
 
-// /health needs no credentials, so the shell can prove the API is reachable
-// before session auth exists (#33).
-function useHealth() {
-  return useQuery({
-    queryKey: ["health"],
-    queryFn: async () => {
-      const res = await fetch("/health");
-      if (!res.ok) throw new Error(`health check failed: ${res.status}`);
-      return res.text();
-    },
-  });
+import Login from "./pages/Login";
+import { useLogout, useSession } from "./session";
+
+function RequireAuth({ children }: { children: ReactNode }) {
+  const { data: authenticated, isPending } = useSession();
+  const location = useLocation();
+
+  if (isPending) return null;
+  if (!authenticated) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  return <>{children}</>;
 }
 
 function Home() {
-  const { data, error, isPending } = useHealth();
+  const logout = useLogout();
 
   return (
     <main>
       <h1>Webhook Gateway</h1>
-      <p>Dashboard shell. Pages land in #34–#37.</p>
-      <p>
-        Gateway:{" "}
-        {isPending ? "checking…" : error ? `unreachable (${error.message})` : `reachable (${data?.trim()})`}
-      </p>
+      <p>Signed in. Config, events, and replay land in #34–#37.</p>
+      <button type="button" onClick={() => logout.mutate()} disabled={logout.isPending}>
+        Sign out
+      </button>
     </main>
   );
 }
@@ -32,8 +30,18 @@ function Home() {
 export default function App() {
   return (
     <Routes>
-      <Route path="/" element={<Home />} />
-      <Route path="*" element={<p>Not found.</p>} />
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="*"
+        element={
+          <RequireAuth>
+            <Routes>
+              <Route path="/" element={<Home />} />
+              <Route path="*" element={<p>Not found.</p>} />
+            </Routes>
+          </RequireAuth>
+        }
+      />
     </Routes>
   );
 }

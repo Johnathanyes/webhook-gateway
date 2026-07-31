@@ -13,7 +13,7 @@ func TestAdminOnly(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := auth.AdminOnly(password, next)
+	handler := auth.AdminOnly(password, nil, next)
 
 	tests := []struct {
 		name       string
@@ -46,7 +46,7 @@ func TestAdminOnly(t *testing.T) {
 // constant time succeeds, so without the non-empty guard a bare "Bearer "
 // header would pass — on the middleware that protects API-key minting.
 func TestAdminOnlyRejectsEverythingWhenPasswordIsEmpty(t *testing.T) {
-	handler := auth.AdminOnly("", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := auth.AdminOnly("", nil, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("handler ran with no admin password configured")
 		w.WriteHeader(http.StatusOK)
 	}))

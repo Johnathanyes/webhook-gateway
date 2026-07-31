@@ -18,6 +18,11 @@ info:
       `read`, `write`, `replay`, `tunnel`. A request whose endpoint needs a
       scope the key lacks gets `403`; an unknown or revoked key gets `401`.
 
+    The dashboard SPA instead uses a **session cookie** (`whg_session`) obtained
+    from `POST /api/auth/login`, so no credential is ever held in JavaScript.
+    A session is the admin password already proven, so it is accepted on every
+    endpoint the admin password is, ncluding API-key management.
+
     The `/ingest/{path}` endpoint is unauthenticated by bearer token — it is
     authenticated by the source path plus the provider signature.
 
@@ -38,6 +43,7 @@ tags:
   - name: deliveries
   - name: replays
   - name: api-keys
+  - name: auth
   - name: ingest
   - name: tunnel
   - name: system
@@ -604,6 +610,68 @@ paths:
         "204": { description: Revoked }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /api/auth/login:
+    post:
+      tags: [auth]
+      summary: Start a dashboard session
+      description: |
+        Exchanges the admin password for an `whg_session` cookie (HttpOnly,
+        SameSite=Lax, 7-day sliding expiry). Intended for the dashboard SPA;
+        programmatic clients should use an API key instead.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string }
+      responses:
+        "200":
+          description: Session cookie set
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authenticated: { type: boolean }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      summary: End the dashboard session
+      description: Expires the cookie in the browser. Sessions are stateless, so there is no server-side record to delete.
+      security: []
+      responses:
+        "204": { description: Cookie expired }
+
+  /api/auth/session:
+    get:
+      tags: [auth]
+      summary: Check the current session
+      description: |
+        Returns 200 when the request carries a valid session cookie, 401
+        otherwise. The SPA calls this on load to choose between the app and the
+        login page. A cookie past half its life is renewed on the response.
+      security: [{ sessionCookie: [] }]
+      responses:
+        "200":
+          description: Session is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  authenticated: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /health:
     get:
       tags: [system]
@@ -677,6 +745,14 @@ components:
       type: http
       scheme: bearer
       description: The admin password only. API keys are rejected on these endpoints.
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: whg_session
+      description: |
+        The dashboard's login cookie, obtained from POST /api/auth/login. It
+        carries admin authority, so it is accepted anywhere the admin password
+        is — including the admin-only API-key endpoints.
 
   parameters:
     IdPath:

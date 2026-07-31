@@ -13,3 +13,26 @@ main {
   margin: 0 auto;
   padding: 2rem 1rem;
 }
+
+form {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 0.5rem;
+  max-width: 20rem;
+}
+
+input,
+button {
+  font: inherit;
+  padding: 0.4rem 0.6rem;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+[role="alert"] {
+  color: #c0392b;
+}

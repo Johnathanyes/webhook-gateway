@@ -15,13 +15,12 @@ import (
 	"webhook-gateway/internal/tenancy"
 )
 
-// Mounts API-key management, guarded by the admin password
-// only.
-func RegisterAPIKeys(mux *http.ServeMux, q *db.Queries, adminPassword string) {
+
+func RegisterAPIKeys(mux *http.ServeMux, q *db.Queries, adminPassword string, sessions *auth.Sessions) {
 	h := &apiKeysHandler{q: q}
-	mux.Handle("POST /api/api-keys", auth.AdminOnly(adminPassword, http.HandlerFunc(h.create)))
-	mux.Handle("GET /api/api-keys", auth.AdminOnly(adminPassword, http.HandlerFunc(h.list)))
-	mux.Handle("DELETE /api/api-keys/{id}", auth.AdminOnly(adminPassword, http.HandlerFunc(h.revoke)))
+	mux.Handle("POST /api/api-keys", auth.AdminOnly(adminPassword, sessions, http.HandlerFunc(h.create)))
+	mux.Handle("GET /api/api-keys", auth.AdminOnly(adminPassword, sessions, http.HandlerFunc(h.list)))
+	mux.Handle("DELETE /api/api-keys/{id}", auth.AdminOnly(adminPassword, sessions, http.HandlerFunc(h.revoke)))
 }
 
 type apiKeysHandler struct {

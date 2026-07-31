@@ -38,10 +38,18 @@ var Scopes = []string{ScopeRead, ScopeWrite, ScopeReplay, ScopeTunnel}
 type Auth struct {
 	q			  *db.Queries
 	adminPassword string
+	sessions      *auth.Sessions
 }
 
 func NewAuth(q *db.Queries, adminPassword string) *Auth {
 	return &Auth{q: q, adminPassword: adminPassword}
+}
+
+// AcceptSessions makes the dashboard's login cookie a valid credential on every
+// endpoint this Auth guards. A session is the admin password already proven, so
+// it passes every scope check. Bearer-only setups never call this.
+func (a *Auth) AcceptSessions(s *auth.Sessions) {
+	a.sessions = s
 }
 
 // RequireScope wraps h so it runs only for the admin password or
@@ -50,6 +58,14 @@ func NewAuth(q *db.Queries, adminPassword string) *Auth {
 // distinction tells a caller whether to fix the key or the request.
 func (a *Auth) RequireScope(scope string, h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The browser's cookie comes first: the SPA sends no Authorization
+		// header at all, so checking it second would cost every dashboard
+		// request a pointless 401 path.
+		if a.sessions != nil && a.sessions.Authenticate(w, r) {
+			h.ServeHTTP(w, r)
+			return
+		}
+
 		const prefix = "Bearer "
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, prefix) {

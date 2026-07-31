@@ -26,7 +26,7 @@ func TestAPIKeysIntegration(t *testing.T) {
 
 	const adminPassword = "test-admin-password"
 	mux := http.NewServeMux()
-	RegisterAPIKeys(mux, q, adminPassword)
+	RegisterAPIKeys(mux, q, adminPassword, nil)
 	// A real scoped surface to exercise the middleware against.
 	RegisterSources(mux, q, enc, catalog, middleware.NewAuth(q, adminPassword), testIngestHandler(t, pool, q, enc, catalog))
 

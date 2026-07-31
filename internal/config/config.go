@@ -19,11 +19,10 @@ type Config struct {
 	LogLevel      string `yaml:"log_level"`      // debug | info | warn | error
 	LogFormat     string `yaml:"log_format"`
 
-	// Ingest abuse-prevention knobs (BR-06). IngestMaxBodyBytes caps a webhook
-	// body (413 over it); IngestRateLimitPerSecond is the per-source token-bucket
-	// refill rate, and doubles as the burst capacity.
 	IngestMaxBodyBytes       int64 `yaml:"ingest_max_body_bytes"`
 	IngestRateLimitPerSecond int   `yaml:"ingest_rate_limit_per_second"`
+
+	SessionCookieSecure *bool `yaml:"session_cookie_secure"`
 }
 
 var validRoles = map[string]bool{
@@ -92,6 +91,13 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("INGEST_RATE_LIMIT_PER_SECOND must be a number, got %q", v)
 		}
 		cfg.IngestRateLimitPerSecond = n
+	}
+	if v := os.Getenv("SESSION_COOKIE_SECURE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("SESSION_COOKIE_SECURE must be true or false, got %q", v)
+		}
+		cfg.SessionCookieSecure = &b
 	}
 
 
