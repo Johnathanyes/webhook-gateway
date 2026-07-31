@@ -9,6 +9,7 @@ const nav = [
   { to: "/destinations", label: "Destinations" },
   { to: "/routes", label: "Routes" },
   { to: "/rules", label: "Rules" },
+  { to: "/api-keys", label: "API keys" },
 ];
 
 export default function Layout() {

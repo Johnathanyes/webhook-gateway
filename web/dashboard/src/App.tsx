@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router";
 
+import ApiKeys from "@/pages/ApiKeys";
 import Layout from "@/components/Layout";
 import Destinations from "@/pages/Destinations";
 import Login from "@/pages/Login";
@@ -34,6 +35,7 @@ export default function App() {
         <Route path="/destinations" element={<Destinations />} />
         <Route path="/routes" element={<RoutesPage />} />
         <Route path="/rules" element={<Rules />} />
+        <Route path="/api-keys" element={<ApiKeys />} />
         <Route path="*" element={<p className="text-sm text-muted-foreground">Not found.</p>} />
       </Route>
     </Routes>
