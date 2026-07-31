@@ -9,10 +9,6 @@ import (
 	"webhook-gateway/internal/sourcedef"
 )
 
-// RegisterProviders exposes the source-definition catalog read-only. The
-// dashboard's source form needs the list of provider slugs, and hardcoding it
-// there would defeat the point of a catalog you extend by dropping a YAML file
-// in internal/sourcedef/catalog/.
 func RegisterProviders(mux *http.ServeMux, catalog map[string]sourcedef.Definition, authz *middleware.Auth) {
 	h := &providersHandler{catalog: catalog}
 	mux.Handle("GET /api/providers", authz.RequireScope(middleware.ScopeRead, http.HandlerFunc(h.list)))
@@ -48,9 +44,6 @@ func (h *providersHandler) list(w http.ResponseWriter, _ *http.Request) {
 		return strings.Compare(a.Name, b.Name)
 	})
 
-	// "none" has no catalog entry — it is the built-in "accept anything,
-	// unverified" option — but a caller choosing a provider needs to see it.
-	// Last, so real providers lead the list.
 	providers = append(providers, providerResponse{
 		Slug:             "none",
 		Name:             "None",
